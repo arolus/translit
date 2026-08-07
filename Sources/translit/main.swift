@@ -757,39 +757,49 @@ final class Updater {
         let zipURL: URL
     }
 
-    /// Fetches the latest release; completion gets the release or a problem
-    /// description. Called on a URLSession queue — hop to main as needed.
+    /// Stops URLSession at the first redirect so the Location header is ours.
+    private final class RedirectCatcher: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+
+    /// Resolves the latest release WITHOUT the GitHub API: unauthenticated
+    /// API calls are limited to 60/hr per IP, which a busy or shared address
+    /// exhausts. /releases/latest answers with a redirect to .../tag/vX.Y.Z —
+    /// the version is read from the Location header, and the asset URL is
+    /// deterministic. Completion runs on a URLSession queue.
     static func fetchLatest(completion: @escaping (Release?, String?) -> Void) {
-        var request = URLRequest(url: URL(string: latestReleaseAPI)!)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let url = URL(string: "https://github.com/\(releasesRepo)/releases/latest")!
+        let session = URLSession(configuration: .ephemeral,
+                                 delegate: RedirectCatcher(), delegateQueue: nil)
+        var request = URLRequest(url: url)
         request.timeoutInterval = 30
-        URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = session.dataTask(with: request) { _, response, error in
+            defer { session.finishTasksAndInvalidate() }
             if let error = error {
                 completion(nil, error.localizedDescription)
                 return
             }
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            guard let http = response as? HTTPURLResponse,
+                  (300..<400).contains(http.statusCode),
+                  let location = http.value(forHTTPHeaderField: "Location"),
+                  let tag = URL(string: location)?.lastPathComponent,
+                  tag.hasPrefix("v"), tag.contains(".") else {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                completion(nil, "GitHub API: HTTP \(code)")
+                completion(nil, "no releases found (HTTP \(code))")
                 return
             }
-            guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = json["tag_name"] as? String else {
-                completion(nil, "unexpected GitHub API response")
-                return
-            }
-            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-            let assets = json["assets"] as? [[String: Any]] ?? []
-            guard let zip = assets.compactMap({ $0["browser_download_url"] as? String })
-                      .first(where: { $0.hasSuffix(".zip") }),
-                  let url = URL(string: zip) else {
-                completion(nil, "release \(tag) has no zip asset")
-                return
-            }
-            latestKnown = version
-            completion(Release(version: version, zipURL: url), nil)
-        }.resume()
+            let version = String(tag.dropFirst())
+            let zip = URL(string: "https://github.com/\(releasesRepo)" +
+                                  "/releases/download/\(tag)/Translit.app.zip")!
+            DispatchQueue.main.async { latestKnown = version }
+            completion(Release(version: version, zipURL: zip), nil)
+        }
+        task.resume()
     }
 
     /// Numeric component-wise comparison: "0.2.10" > "0.2.9".
