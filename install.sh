@@ -14,6 +14,13 @@ BIN_LINK="$HOME/.local/bin/translit"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 UID_NUM="$(id -u)"
 
+# Stop a running instance first: the checkout's Translit.app may be the very
+# bundle that is running, and macOS refuses to delete a busy app bundle
+# ("Resource busy"). The agent is (re)loaded at the end anyway.
+echo "==> Stopping a running instance (if any)..."
+launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
+killall translit 2>/dev/null || true
+
 # Always rebuild: "git pull && ./install.sh" must install what was pulled,
 # not a stale bundle left over from a previous build.
 echo "==> Building..."
