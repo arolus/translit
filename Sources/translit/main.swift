@@ -542,6 +542,8 @@ final class Engine {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self.frontAppID = app?.bundleIdentifier ?? ""
             self.reset()
+            // The icon dims in excluded apps — tell the status bar to re-look.
+            self.onStateChange?()
         }
         frontAppID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
 
@@ -1351,7 +1353,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     /// Plain keyboard when healthy; a badged one when something blocks
     /// corrections (missing Accessibility, suspended tap) so the problem is
-    /// visible without opening the menu.
+    /// visible without opening the menu. Dimmed (the system "disabled" look)
+    /// when corrections are off on purpose — globally or for the frontmost
+    /// app — so a glance tells why nothing is being fixed here.
     func refreshIcon() {
         guard let button = item.button else { return }
         let problem = engine == nil || !Accessibility.isTrusted || engine?.tapSuspended == true
@@ -1368,6 +1372,9 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         } else {
             button.title = problem ? "Тр!" : "Тр"
         }
+
+        let frontID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        button.appearsDisabled = !Settings.enabled || Settings.excludedApps.contains(frontID)
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -1469,6 +1476,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func toggleEnabled() {
         Settings.enabled.toggle()
+        refreshIcon()
     }
 
     @objc private func toggleSound() {
@@ -1505,6 +1513,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         var excluded = Settings.excludedApps
         if excluded.contains(id) { excluded.remove(id) } else { excluded.insert(id) }
         Settings.excludedApps = excluded
+        refreshIcon()
     }
 }
 
