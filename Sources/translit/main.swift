@@ -432,6 +432,13 @@ struct Key {
 
 /// A just-applied auto-fix, kept so an immediate Backspace can revert it.
 struct Correction {
+    /// The fixable token, as typed — replayed by keycode in the new layout.
+    let coreKeys: [Key]
+    /// Word-final punctuation as it read in the ORIGINAL layout ("flight," —
+    /// the comma); retyped verbatim as unicode after the fix, because its
+    /// keycode would produce a different character in the new layout.
+    let trailingText: String
+    /// Core + trailing keys — undo replays these in the original layout.
     let originalKeys: [Key]
     let separator: Key
     let originalLayout: Layouts.Current
@@ -721,12 +728,26 @@ final class Engine {
         guard current == .en || current == .ru else { return nil }
         let target: Layouts.Current = current == .en ? .ru : .en
 
-        let ownWord = readWord(word, current: current)
+        // Keys at the word's tail that produce no letter in the CURRENT
+        // layout are word-final punctuation of the on-screen text, not part
+        // of the token: the comma key is a Russian б, so "flight," used to
+        // read as "impossible English" and lose to garbage Russian by
+        // default. Judge the core only; the tail is retyped verbatim.
+        let ownLetterIndex = current == .en ? layouts.enLetterIndex : layouts.ruLetterIndex
+        var coreKeys = word
+        var trailingKeys: [Key] = []
+        while let last = coreKeys.last, ownLetterIndex[Int(last.code)] <= 0 {
+            trailingKeys.insert(last, at: 0)
+            coreKeys.removeLast()
+        }
+        guard !coreKeys.isEmpty else { return nil }
+
+        let ownWord = readWord(coreKeys, current: current)
         guard !dict.exceptions.contains(ownWord.lowercased()) else { return nil }
 
         if !dict.rules.contains(ownWord.lowercased()) {
-            guard word.count >= minWordLength else { return nil }
-            let codes = word.map { $0.code }
+            guard coreKeys.count >= minWordLength else { return nil }
+            let codes = coreKeys.map { $0.code }
             let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
                                        table: enBigrams, n: enN)
             let ruScore = scoreReading(codes, letterIndex: layouts.ruLetterIndex,
@@ -737,7 +758,10 @@ final class Engine {
             if let ownScore = own, otherScore - ownScore < switchMargin { return nil }
         }
 
-        return Correction(originalKeys: word, separator: separator,
+        let ownMap = current == .en ? layouts.enChars : layouts.ruChars
+        let trailingText = String(trailingKeys.compactMap { ownMap[Int($0.code)] })
+        return Correction(coreKeys: coreKeys, trailingText: trailingText,
+                          originalKeys: word, separator: separator,
                           originalLayout: current, fixedLayout: target,
                           originalWord: ownWord)
     }
@@ -754,7 +778,8 @@ final class Engine {
         postBackspaces(correction.originalKeys.count)
         layouts.select(correction.fixedLayout)
         usleep(layoutSettleMicroseconds)
-        replay(correction.originalKeys)
+        replay(correction.coreKeys)
+        typeText(correction.trailingText)
         replay([correction.separator])
         if Settings.soundOnFix { NSSound(named: "Pop")?.play() }
         log("Fixed \"\(correction.originalWord)\" → " +
@@ -765,7 +790,8 @@ final class Engine {
     /// Reverts a fix: erases the retyped word + separator, restores the
     /// original layout, retypes the original keys, remembers the exception.
     private func undo(_ correction: Correction) {
-        postBackspaces(correction.originalKeys.count + 1)
+        // On screen: core (fixed layout) + trailing text + separator.
+        postBackspaces(correction.coreKeys.count + correction.trailingText.count + 1)
         layouts.select(correction.originalLayout)
         usleep(layoutSettleMicroseconds)
         replay(correction.originalKeys)
@@ -794,6 +820,23 @@ final class Engine {
         guard let source = makeSource() else { return }
         for key in keys {
             postKey(key.code, flags: key.shift ? .maskShift : [], source: source)
+        }
+    }
+
+    /// Types literal characters as unicode events — layout-independent, used
+    /// for word-final punctuation whose keycode means something else in the
+    /// layout we just switched to.
+    private func typeText(_ text: String) {
+        guard !text.isEmpty, let source = makeSource() else { return }
+        for unit in Array(text.utf16) {
+            var utf16Unit = unit
+            for isDown in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: source,
+                                          virtualKey: 0, keyDown: isDown) else { continue }
+                event.keyboardSetUnicodeString(stringLength: 1, unicodeString: &utf16Unit)
+                event.post(tap: .cghidEventTap)
+            }
+            usleep(keystrokeGapMicroseconds)
         }
     }
 
