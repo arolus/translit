@@ -449,6 +449,11 @@ final class Engine {
     private var buffer: [Key] = []
     private var tainted = false   // digits/Option chars seen — do not touch this word
     private var lastCorrection: Correction?
+    /// A fix is being applied asynchronously; incoming events pass through
+    /// untouched meanwhile (the on-screen text is in flux anyway).
+    private var applyingFix = false
+    /// Recent tap-disabled timestamps — the thrash detector's memory.
+    private var tapDisabledTimes: [Date] = []
     private var frontAppID: String = ""
     private let enN = enAlphabet.count + 1
     private let ruN = ruAlphabet.count + 1
@@ -523,8 +528,18 @@ final class Engine {
     func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let pass: Unmanaged<CGEvent>? = Unmanaged.passUnretained(event)
 
-        // macOS disables taps that stall or on certain secure events — re-enable.
+        // macOS disables taps that stall or on certain secure events — re-enable,
+        // but NOT indefinitely: if the tap keeps dying, blindly resurrecting it
+        // turns the whole system's keyboard into a slideshow. After 5 deaths in
+        // a minute we stay down — typing recovers, corrections stop.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            tapDisabledTimes = tapDisabledTimes.filter { $0.timeIntervalSinceNow > -60 }
+            tapDisabledTimes.append(Date())
+            if tapDisabledTimes.count > 5 {
+                log("⚠️ Event tap disabled \(tapDisabledTimes.count) times in a minute — " +
+                    "giving up on re-enabling. Corrections are off until restart.")
+                return pass
+            }
             if let tap = tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return pass
         }
@@ -541,6 +556,10 @@ final class Engine {
             return pass
         }
 
+        // While synthetic events are being posted, real keystrokes interleave
+        // with a text state that is mid-rewrite — stay out of the way.
+        if applyingFix { return pass }
+
         let code = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
 
@@ -552,9 +571,14 @@ final class Engine {
         }
 
         // Backspace right after an auto-fix reverts it; swallow the keystroke.
+        // The revert itself runs async — the tap callback must never block.
         if code == 51, let correction = lastCorrection {
             lastCorrection = nil
-            undo(correction)
+            applyingFix = true
+            DispatchQueue.main.async { [weak self] in
+                self?.undo(correction)
+                self?.applyingFix = false
+            }
             return nil
         }
         lastCorrection = nil
@@ -582,8 +606,19 @@ final class Engine {
             let wasTainted = tainted
             reset()
             if !wasTainted, !word.isEmpty,
-               let fixed = evaluate(word: word, separator: Key(code: code, shift: flags.contains(.maskShift))) {
-                lastCorrection = fixed
+               let correction = decideFix(word: word,
+                                          separator: Key(code: code,
+                                                         shift: flags.contains(.maskShift))) {
+                // Swallow the separator and apply the fix asynchronously: the
+                // callback returns immediately, so system-wide key delivery
+                // never stalls (a blocking callback here used to freeze input).
+                applyingFix = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.applyFix(correction)
+                    self.lastCorrection = correction
+                    self.applyingFix = false
+                }
                 return nil // the separator is retyped as part of the fix
             }
             return pass
@@ -613,12 +648,11 @@ final class Engine {
 
     // MARK: Decision & fix
 
-    /// Decides whether the buffered word was typed in the wrong layout and
-    /// applies the fix. Returns the applied correction, nil when left alone.
+    /// Pure decision, no side effects — safe to call from the tap callback.
     /// Dictionary rules force a fix bypassing statistics and the minimum
     /// length (short words like «и»/«не» are statistically undecidable);
     /// exceptions veto everything.
-    private func evaluate(word: [Key], separator: Key) -> Correction? {
+    private func decideFix(word: [Key], separator: Key) -> Correction? {
         guard Settings.enabled else { return nil }
         guard !Settings.excludedApps.contains(frontAppID) else { return nil }
         // Password fields enable secure input; never touch those.
@@ -631,7 +665,6 @@ final class Engine {
         let ownWord = readWord(word, current: current)
         guard !dict.exceptions.contains(ownWord.lowercased()) else { return nil }
 
-        var reason = "rule"
         if !dict.rules.contains(ownWord.lowercased()) {
             guard word.count >= minWordLength else { return nil }
             let codes = word.map { $0.code }
@@ -643,13 +676,8 @@ final class Engine {
 
             guard let otherScore = other, otherScore >= plausibilityFloor else { return nil }
             if let ownScore = own, otherScore - ownScore < switchMargin { return nil }
-            reason = "own \(own.map { String(format: "%.1f", $0) } ?? "impossible"), " +
-                     "other \(String(format: "%.1f", otherScore))"
         }
 
-        applyFix(word: word, separator: separator, to: target)
-        log("Fixed \"\(ownWord)\" → \(target == .ru ? "ru" : "en") (\(reason))")
-        onActivity?(ownWord)
         return Correction(originalKeys: word, separator: separator,
                           originalLayout: current, fixedLayout: target,
                           originalWord: ownWord)
@@ -662,13 +690,17 @@ final class Engine {
 
     /// Erases the word, switches layout, retypes word + separator.
     /// The separator was swallowed, so only the word itself is on screen.
-    private func applyFix(word: [Key], separator: Key, to target: Layouts.Current) {
-        postBackspaces(word.count)
-        layouts.select(target)
+    /// Runs asynchronously on the main queue, never inside the tap callback.
+    private func applyFix(_ correction: Correction) {
+        postBackspaces(correction.originalKeys.count)
+        layouts.select(correction.fixedLayout)
         usleep(layoutSettleMicroseconds)
-        replay(word)
-        replay([separator])
+        replay(correction.originalKeys)
+        replay([correction.separator])
         if Settings.soundOnFix { NSSound(named: "Pop")?.play() }
+        log("Fixed \"\(correction.originalWord)\" → " +
+            (correction.fixedLayout == .ru ? "ru" : "en"))
+        onActivity?(correction.originalWord)
     }
 
     /// Reverts a fix: erases the retyped word + separator, restores the
