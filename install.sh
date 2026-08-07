@@ -14,17 +14,19 @@ BIN_LINK="$HOME/.local/bin/translit"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 UID_NUM="$(id -u)"
 
-if [ ! -d "$APP_SRC" ] || [ ! -x "$APP_SRC/Contents/MacOS/translit" ]; then
-    echo "==> Bundle not found, building..."
-    ./build.sh
-fi
+# Always rebuild: "git pull && ./install.sh" must install what was pulled,
+# not a stale bundle left over from a previous build.
+echo "==> Building..."
+./build.sh
 
 echo "==> Installing $APP_DST"
 mkdir -p "$(dirname "$APP_DST")"
 rm -rf "$APP_DST"
 cp -R "$APP_SRC" "$APP_DST"
 # Drop a stale copy from the old install location (pre-0.2.3 used ~/Applications).
-[ "$APP_DST" != "$HOME/Applications/Translit.app" ] && rm -rf "$HOME/Applications/Translit.app"
+if [ "$APP_DST" != "$HOME/Applications/Translit.app" ]; then
+    rm -rf "$HOME/Applications/Translit.app"
+fi
 
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APP_DST" || true
@@ -44,7 +46,9 @@ if [ -d "$DICT_REPO" ] && [ ! -L "$DICT_HOME" ]; then
     mkdir -p "$HOME/.config"
     if [ -d "$DICT_HOME" ]; then
         for f in rules.txt exceptions.txt; do
-            [ -f "$DICT_HOME/$f" ] && [ ! -f "$DICT_REPO/$f" ] && cp "$DICT_HOME/$f" "$DICT_REPO/"
+            if [ -f "$DICT_HOME/$f" ] && [ ! -f "$DICT_REPO/$f" ]; then
+                cp "$DICT_HOME/$f" "$DICT_REPO/"
+            fi
         done
         rm -rf "$DICT_HOME"
     fi
