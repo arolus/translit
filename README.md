@@ -86,12 +86,14 @@ polls and picks the permission up as soon as it is granted.
 
 ```sh
 git clone https://github.com/arolus/translit.git && cd translit
-./install.sh    # builds, → ~/Applications, LaunchAgent com.arsidian.translit
+./install.sh    # builds, → /Applications, LaunchAgent com.arsidian.translit
 ```
 
 Or grab a prebuilt `Translit.app.zip` from the
-[releases](https://github.com/arolus/translit/releases). `./build.sh` alone
-rebuilds the bundle without installing.
+[releases](https://github.com/arolus/translit/releases) and unzip into
+/Applications — enable «Запускать при входе» from the status bar menu to
+start it at login (install.sh sets that up automatically). `./build.sh`
+alone rebuilds the bundle without installing.
 
 Requires an enabled Russian keyboard layout and the Accessibility permission
 (the system prompt appears on first start; the app polls until granted).

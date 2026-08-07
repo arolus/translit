@@ -942,7 +942,12 @@ final class Updater {
             fail("В архиве релиза нет Translit.app.")
             return
         }
-        let dst = NSHomeDirectory() + "/Applications/Translit.app"
+        // System-wide /Applications so the app shows up where people look;
+        // ~/Applications only when /Applications isn't writable. A stale copy
+        // at the other location is removed (migration from older versions).
+        let homeInstall = NSHomeDirectory() + "/Applications/Translit.app"
+        let dst = fm.isWritableFile(atPath: "/Applications")
+            ? "/Applications/Translit.app" : homeInstall
         do {
             try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent,
                                    withIntermediateDirectories: true)
@@ -953,6 +958,7 @@ final class Updater {
             return
         }
         try? fm.removeItem(atPath: tmpDir)
+        if dst != homeInstall { try? fm.removeItem(atPath: homeInstall) }
 
         let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/" +
                          "LaunchServices.framework/Support/lsregister"
@@ -960,19 +966,21 @@ final class Updater {
         // The old TCC entry points at the previous binary — reset so the fresh
         // one can raise the system prompt instead of silently not working.
         runProcess("/usr/bin/tccutil", ["reset", "Accessibility", bundleID])
+        // Keep the login agent pointing at the fresh binary (the install may
+        // have just migrated between Applications folders).
+        if Autostart.enabled {
+            Autostart.writePlist(binary: dst + "/Contents/MacOS/translit")
+        }
 
         log("Updated to \(release.version), restarting…")
-        // Under launchd: kickstart kills us and starts the new binary.
-        if runProcess("/bin/launchctl",
-                      ["kickstart", "-k", "gui/\(getuid())/\(bundleID)"]) != 0 {
-            // Manual run: relaunch the installed copy after we exit (the delay
-            // lets the singleton lock go free).
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-            proc.arguments = ["-c", "sleep 1; /usr/bin/open -a '\(dst)'"]
-            try? proc.run()
-            DispatchQueue.main.async { NSApp.terminate(nil) }
-        }
+        // Relaunch from the new location — works for launchd and manual runs
+        // alike. The detached shell survives our exit; the delay lets the
+        // singleton lock go free.
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", "sleep 1; /usr/bin/open -a '\(dst)'"]
+        try? proc.run()
+        DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
     @discardableResult
@@ -1346,6 +1354,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
 
         if updater != nil, appVersion != "dev" {
+            let login = NSMenuItem(title: "Запускать при входе",
+                                   action: #selector(toggleAutostart), keyEquivalent: "")
+            login.target = self
+            login.state = Autostart.enabled ? .on : .off
+            login.isEnabled = Autostart.launchBinary != nil
+            menu.addItem(login)
+
             let auto = NSMenuItem(title: "Автообновление",
                                   action: #selector(toggleAutoUpdate), keyEquivalent: "")
             auto.target = self
@@ -1379,6 +1394,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func toggleAutoUpdate() {
         Settings.autoUpdate.toggle()
+    }
+
+    @objc private func toggleAutostart() {
+        Autostart.toggle()
     }
 
     @objc private func checkUpdates() {

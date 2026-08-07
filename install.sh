@@ -5,7 +5,10 @@ cd "$(dirname "$0")"
 
 LABEL="com.arsidian.translit"
 APP_SRC="$(pwd)/Translit.app"
-APP_DST="$HOME/Applications/Translit.app"
+# System-wide /Applications so the app is visible where people look for it;
+# fall back to ~/Applications when /Applications isn't writable.
+APP_DST="/Applications/Translit.app"
+[ -w "/Applications" ] || APP_DST="$HOME/Applications/Translit.app"
 BIN_DST="$APP_DST/Contents/MacOS/translit"
 BIN_LINK="$HOME/.local/bin/translit"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
@@ -17,9 +20,11 @@ if [ ! -d "$APP_SRC" ] || [ ! -x "$APP_SRC/Contents/MacOS/translit" ]; then
 fi
 
 echo "==> Installing $APP_DST"
-mkdir -p "$HOME/Applications"
+mkdir -p "$(dirname "$APP_DST")"
 rm -rf "$APP_DST"
 cp -R "$APP_SRC" "$APP_DST"
+# Drop a stale copy from the old install location (pre-0.2.3 used ~/Applications).
+[ "$APP_DST" != "$HOME/Applications/Translit.app" ] && rm -rf "$HOME/Applications/Translit.app"
 
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APP_DST" || true
