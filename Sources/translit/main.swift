@@ -1483,6 +1483,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         Autostart.toggle()
     }
 
+    @objc private func reviveTapClicked() {
+        engine?.reviveTap()
+    }
+
     @objc private func checkUpdates() {
         updater?.checkAndApply(force: true)
     }
@@ -1535,9 +1539,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 timer.invalidate()
                 self?.accessibilityRetryTimer = nil
                 self?.startEngine(engine)
+                self?.statusBar?.refreshIcon()
             }
         }
         statusBar = StatusBarController(engine: engine, updater: updater, startupProblem: nil)
+        engine.onStateChange = { [weak self] in self?.statusBar?.refreshIcon() }
     }
 
     private func startEngine(_ engine: Engine) {
