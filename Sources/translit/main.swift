@@ -987,6 +987,86 @@ final class Updater {
     }
 }
 
+// MARK: - Autostart
+
+/// Login autostart via a LaunchAgent plist (SMAppService needs a Team ID
+/// signature; the plist route works for ad-hoc tools, same as the other
+/// dotfiles utilities). Enabling writes the plist — launchd picks it up at
+/// the next login, the app is already running now. Disabling removes it;
+/// the current instance keeps running.
+enum Autostart {
+    static let plistPath = NSHomeDirectory() + "/Library/LaunchAgents/\(bundleID).plist"
+
+    static var enabled: Bool { FileManager.default.fileExists(atPath: plistPath) }
+
+    /// Binary the agent should launch: the bundle we are running from, or an
+    /// installed copy when running unbundled (straight from .build).
+    static var launchBinary: String? {
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            return Bundle.main.bundleURL
+                .appendingPathComponent("Contents/MacOS/translit").path
+        }
+        for dir in ["/Applications", NSHomeDirectory() + "/Applications"] {
+            let bin = dir + "/Translit.app/Contents/MacOS/translit"
+            if FileManager.default.isExecutableFile(atPath: bin) { return bin }
+        }
+        return nil
+    }
+
+    static func toggle() {
+        if enabled { disable() } else { enable() }
+    }
+
+    static func enable() {
+        guard let binary = launchBinary else {
+            log("⚠️ Autostart: no installed Translit.app found.")
+            return
+        }
+        writePlist(binary: binary)
+        log("Autostart enabled (\(binary)).")
+    }
+
+    static func disable() {
+        try? FileManager.default.removeItem(atPath: plistPath)
+        log("Autostart disabled.")
+    }
+
+    /// (Re)writes the LaunchAgent plist. Also called after updates so the
+    /// agent always points at the current binary location.
+    static func writePlist(binary: String) {
+        let logs = NSHomeDirectory() + "/Library/Logs"
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>\(bundleID)</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>\(binary)</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <false/>
+            <key>StandardOutPath</key>
+            <string>\(logs)/translit.out.log</string>
+            <key>StandardErrorPath</key>
+            <string>\(logs)/translit.err.log</string>
+            <key>ProcessType</key>
+            <string>Interactive</string>
+        </dict>
+        </plist>
+        """
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: (plistPath as NSString).deletingLastPathComponent,
+                                withIntermediateDirectories: true)
+        try? fm.createDirectory(atPath: logs, withIntermediateDirectories: true)
+        try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+    }
+}
+
 // MARK: - Accessibility
 
 enum Accessibility {
