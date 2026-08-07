@@ -452,8 +452,14 @@ final class Engine {
     /// A fix is being applied asynchronously; incoming events pass through
     /// untouched meanwhile (the on-screen text is in flux anyway).
     private var applyingFix = false
-    /// Recent tap-disabled timestamps — the thrash detector's memory.
+    /// Recent tap-disabled-by-timeout timestamps — the thrash detector.
     private var tapDisabledTimes: [Date] = []
+    /// The thrash breaker tripped; the tap stays down until the revival
+    /// timer (or the user, or a wake) re-arms it.
+    private(set) var tapSuspended = false
+    private var revivalTimer: Timer?
+    /// Fired on suspend/revive so the status bar can update its icon.
+    var onStateChange: (() -> Void)?
     private var frontAppID: String = ""
     private let enN = enAlphabet.count + 1
     private let ruN = ruAlphabet.count + 1
@@ -496,6 +502,37 @@ final class Engine {
         return true
     }
 
+    /// Re-arms the tap and clears the thrash history. Called by the revival
+    /// timer, on wake from sleep, and from the menu.
+    func reviveTap() {
+        tapDisabledTimes.removeAll()
+        tapSuspended = false
+        if let tap = tap { CGEvent.tapEnable(tap: tap, enable: true) }
+        onStateChange?()
+        log("Event tap re-armed.")
+    }
+
+    /// What is keeping corrections from working right now, in human terms.
+    /// nil = everything is fine.
+    func currentStatus() -> String? {
+        if tapSuspended { return "Перехват приостановлен после сбоев — оживёт сам" }
+        if IsSecureEventInputEnabled() {
+            let culprit = Engine.secureInputCulprit().map { " — \($0)" } ?? ""
+            return "Пауза: защищённый ввод\(culprit)"
+        }
+        return nil
+    }
+
+    /// The process holding secure input, per the window server session.
+    /// Helps find the app that "ate" corrections (a password field left
+    /// focused, a stuck loginwindow after unlock, etc.).
+    static func secureInputCulprit() -> String? {
+        guard let info = CGSessionCopyCurrentDictionary() as? [String: Any],
+              let pid = info["kCGSSessionSecureInputPID"] as? Int else { return nil }
+        let name = NSRunningApplication(processIdentifier: pid_t(pid))?.localizedName
+        return name.map { "\($0)" } ?? "процесс \(pid)"
+    }
+
     private func observeContextChanges() {
         // Frontmost app changes: the on-screen text no longer matches the buffer.
         let wsCenter = NSWorkspace.shared.notificationCenter
@@ -507,6 +544,13 @@ final class Engine {
             self.reset()
         }
         frontAppID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+
+        // Sleep can leave the tap disabled — re-arm on wake.
+        wsCenter.addObserver(forName: NSWorkspace.didWakeNotification,
+                             object: nil, queue: .main) { [weak self] _ in
+            self?.reset()
+            self?.reviveTap()
+        }
 
         // Manual layout switches: the buffer's "as typed" reading changes meaning.
         DistributedNotificationCenter.default().addObserver(
@@ -528,16 +572,29 @@ final class Engine {
     func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let pass: Unmanaged<CGEvent>? = Unmanaged.passUnretained(event)
 
-        // macOS disables taps that stall or on certain secure events — re-enable,
-        // but NOT indefinitely: if the tap keeps dying, blindly resurrecting it
-        // turns the whole system's keyboard into a slideshow. After 5 deaths in
-        // a minute we stay down — typing recovers, corrections stop.
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        // macOS disables taps on secure input transitions (normal — just
+        // re-arm) and when a callback stalls (timeout — count it). If the tap
+        // keeps dying by timeout, blindly resurrecting it turns the whole
+        // system's keyboard into a slideshow: cool down for a minute instead,
+        // then revive automatically.
+        if type == .tapDisabledByUserInput {
+            if let tap = tap, !tapSuspended { CGEvent.tapEnable(tap: tap, enable: true) }
+            return pass
+        }
+        if type == .tapDisabledByTimeout {
             tapDisabledTimes = tapDisabledTimes.filter { $0.timeIntervalSinceNow > -60 }
             tapDisabledTimes.append(Date())
+            log("Event tap disabled by timeout (\(tapDisabledTimes.count) in the last minute).")
             if tapDisabledTimes.count > 5 {
-                log("⚠️ Event tap disabled \(tapDisabledTimes.count) times in a minute — " +
-                    "giving up on re-enabling. Corrections are off until restart.")
+                tapSuspended = true
+                onStateChange?()
+                log("⚠️ Tap keeps stalling — corrections paused for 60 s, then auto-revive.")
+                revivalTimer?.invalidate()
+                revivalTimer = Timer.scheduledTimer(withTimeInterval: 60,
+                                                    repeats: false) { [weak self] _ in
+                    self?.revivalTimer = nil
+                    self?.reviveTap()
+                }
                 return pass
             }
             if let tap = tap { CGEvent.tapEnable(tap: tap, enable: true) }
@@ -1288,21 +1345,47 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
+        item.button?.toolTip = "Translit — автопереключение раскладки"
+        refreshIcon()
+    }
+
+    /// Plain keyboard when healthy; a badged one when something blocks
+    /// corrections (missing Accessibility, suspended tap) so the problem is
+    /// visible without opening the menu.
+    func refreshIcon() {
         guard let button = item.button else { return }
+        let problem = engine == nil || !Accessibility.isTrusted || engine?.tapSuspended == true
+        let names = problem
+            ? ["keyboard.badge.ellipsis", "exclamationmark.triangle"]
+            : ["keyboard"]
         let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-        if let base = NSImage(systemSymbolName: "keyboard",
-                              accessibilityDescription: "Translit") {
+        if let base = names.lazy.compactMap({
+            NSImage(systemSymbolName: $0, accessibilityDescription: "Translit")
+        }).first {
             let img = base.withSymbolConfiguration(cfg) ?? base
             img.isTemplate = true
             button.image = img
         } else {
-            button.title = "Тр"
+            button.title = problem ? "Тр!" : "Тр"
         }
-        button.toolTip = "Translit — автопереключение раскладки"
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        refreshIcon()
+
+        // Engine health first: secure input or a suspended tap explain
+        // "перестало работать" better than silence.
+        if let status = engine?.currentStatus() {
+            menu.addItem(NSMenuItem(title: status, action: nil, keyEquivalent: ""))
+            if engine?.tapSuspended == true {
+                let revive = NSMenuItem(title: "Возобновить перехват сейчас",
+                                        action: #selector(reviveTapClicked), keyEquivalent: "")
+                revive.target = self
+                menu.addItem(revive)
+            }
+            menu.addItem(.separator())
+        }
 
         // Accessibility state is checked live: the warning disappears from the
         // menu as soon as the permission is granted.
