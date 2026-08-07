@@ -52,10 +52,25 @@ DICT_HOME="$HOME/.config/translit"
 if [ -d "$DICT_REPO" ] && [ ! -L "$DICT_HOME" ]; then
     mkdir -p "$HOME/.config"
     if [ -d "$DICT_HOME" ]; then
+        # Merge, never discard: word lines from the home copy that the repo
+        # copy lacks are appended. A rules file without the v2 marker has old
+        # semantics — its words can't be merged safely, keep it as a backup.
         for f in rules.txt exceptions.txt; do
-            if [ -f "$DICT_HOME/$f" ] && [ ! -f "$DICT_REPO/$f" ]; then
+            [ -f "$DICT_HOME/$f" ] || continue
+            if [ ! -f "$DICT_REPO/$f" ]; then
                 cp "$DICT_HOME/$f" "$DICT_REPO/"
+                continue
             fi
+            if [ "$f" = "rules.txt" ] && ! grep -q "translit-rules v2" "$DICT_HOME/$f"; then
+                cp "$DICT_HOME/$f" "$DICT_REPO/$f.backup-v1"
+                echo "==> Old-format $f kept as $f.backup-v1 (not merged)"
+                continue
+            fi
+            while IFS= read -r line; do
+                word="$(printf '%s' "$line" | tr -d '[:space:]')"
+                case "$word" in ''|'#'*) continue ;; esac
+                grep -qxF "$word" "$DICT_REPO/$f" || printf '%s\n' "$word" >> "$DICT_REPO/$f"
+            done < "$DICT_HOME/$f"
         done
         rm -rf "$DICT_HOME"
     fi

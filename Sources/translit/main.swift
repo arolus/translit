@@ -252,20 +252,60 @@ final class Layouts {
 // MARK: - User dictionary (rules & exceptions)
 
 /// Two plain-text word lists in ~/.config/translit (a symlink into the
-/// dotfiles repo, so edits sync between machines via git):
-///   rules.txt      — always fix these words, bypassing statistics and the
-///                    minimum length ("b" → «и», "yt" → «не», "еру" → "the");
-///   exceptions.txt — never fix these; Backspace-undo appends here.
-/// Words are matched against the as-typed reading, lowercase. The direction
-/// is implied by the alphabet: a Latin entry can only match with the English
-/// layout active, a Cyrillic one with the Russian.
-///
+/// dotfiles repo when installed from it, so edits sync between machines):
+///   rules.txt      — REAL words, restored whenever their wrong-layout
+///                    typing appears: «и» rescues "b ", "the" rescues «еру».
+///                    Bypasses statistics and the minimum length; direction
+///                    is implied by the entry's alphabet.
+///   exceptions.txt — as-typed readings never to fix; Backspace-undo
+///                    appends here.
 /// Files are watched with dispatch sources and reloaded on change — edit in
 /// any editor mid-flight, no restart needed.
+///
+/// Format v2: rules hold canonical words (people naturally write «в», not
+/// "d"). Files without the v2 marker are migrated once by converting each
+/// entry through the layout maps.
 final class UserDict {
     static let dirPath = NSHomeDirectory() + "/.config/translit"
     static let rulesPath = dirPath + "/rules.txt"
     static let exceptionsPath = dirPath + "/exceptions.txt"
+    static let formatMarker = "# translit-rules v2"
+
+    /// Canonical default rules, seeded on machines without a dictionary and
+    /// merged in when migrating a v1 file. Mirrors .config/translit/rules.txt
+    /// in the dotfiles repo — keep the two in sync.
+    /// Note: Russian words ending in б/ю/ж/э/х/ъ are useless as rules — their
+    /// final key reads as English punctuation and is split off before the
+    /// dictionary lookup — so they are deliberately absent.
+    static let defaultRuleWords = [
+        // Russian, 1–3 letters (fix en→ru)
+        "а", "в", "и", "к", "о", "с", "у", "я",
+        "на", "за", "не", "но", "по", "до", "от", "из", "он", "мы", "ты", "вы",
+        "же", "ли", "бы", "да", "ни", "ну", "то", "та", "те", "ту", "со", "во",
+        "ей", "ее", "им",
+        "так", "как", "что", "все", "это", "вот", "кто", "где", "там", "тут",
+        "они", "она", "оно", "нас", "вас", "ним", "ней", "его", "ему", "чем",
+        "том", "той", "мне", "мой", "моя", "наш", "ваш", "сам", "нет", "был",
+        "два", "три", "сто", "лет", "год", "раз",
+        // English (fix ru→en)
+        "the", "is", "if", "in", "it", "on", "at", "or", "of", "to", "no",
+        "not", "and", "for", "ok", "be", "me", "we", "he", "my", "by", "do",
+        "go", "so", "up", "us", "am", "an", "as",
+    ]
+
+    private static var rulesHeader: String {
+        """
+        \(formatMarker)
+        # Translit rules: real words that are always restored when typed in the
+        # wrong layout. Cyrillic entries fix en→ru («и» rescues "b "), Latin
+        # entries fix ru→en ("the" rescues «еру»). One word per line, # for
+        # comments, case-insensitive. The app reloads this file on change.
+        """
+    }
+
+    private static var defaultRulesContent: String {
+        rulesHeader + "\n\n" + defaultRuleWords.joined(separator: "\n") + "\n"
+    }
 
     private(set) var rules: Set<String> = []
     private(set) var exceptions: Set<String> = []
@@ -274,30 +314,53 @@ final class UserDict {
     /// Fired on the main queue after any change — from the UI or the files.
     var onChange: (() -> Void)?
 
-    init() {
+    /// `converting` maps a word to its other-layout reading (Layouts.converted)
+    /// and powers the one-time v1 → v2 file migration; nil skips migration.
+    init(converting: ((String) -> String)? = nil) {
         ensureFiles()
         migrateLegacyExceptions()
+        migrateRulesFormat(converting: converting)
         load()
     }
 
     private func ensureFiles() {
         let fm = FileManager.default
         try? fm.createDirectory(atPath: Self.dirPath, withIntermediateDirectories: true)
-        let rulesHeader = """
-        # Translit rules: always fix these words. Latin lines fix en→ru,
-        # Cyrillic lines fix ru→en. One word per line, # for comments.
-        """
         let exceptionsHeader = """
-        # Translit exceptions: never auto-fix these words.
+        # Translit exceptions: never auto-fix these words. One word per line,
+        # spelled as typed (the reading in the layout that was active).
         # Backspace right after an auto-fix reverts it and appends the word here.
         """
         if !fm.fileExists(atPath: Self.rulesPath) {
-            try? (rulesHeader + "\n").write(toFile: Self.rulesPath, atomically: true, encoding: .utf8)
+            try? Self.defaultRulesContent.write(toFile: Self.rulesPath, atomically: true,
+                                                encoding: .utf8)
         }
         if !fm.fileExists(atPath: Self.exceptionsPath) {
-            try? (exceptionsHeader + "\n").write(toFile: Self.exceptionsPath, atomically: true,
-                                                 encoding: .utf8)
+            try? (exceptionsHeader + "\nеще\n").write(toFile: Self.exceptionsPath,
+                                                      atomically: true, encoding: .utf8)
         }
+    }
+
+    /// v1 rules were spelled "as typed in the wrong layout" ("b", "yt",
+    /// "еру") — counter-intuitive, and under v2 matching they would fire in
+    /// the WRONG direction. Convert every old entry to its canonical word,
+    /// merge with the defaults, and stamp the marker.
+    private func migrateRulesFormat(converting: ((String) -> String)?) {
+        guard let text = try? String(contentsOfFile: Self.rulesPath, encoding: .utf8),
+              !text.contains(Self.formatMarker) else { return }
+        guard let convert = converting else { return }
+        var words = Self.defaultRuleWords
+        var seen = Set(words)
+        for line in text.split(separator: "\n") {
+            let word = line.trimmingCharacters(in: .whitespaces).lowercased()
+            if word.isEmpty || word.hasPrefix("#") { continue }
+            let canonical = convert(word)
+            let keep = canonical.contains("?") ? word : canonical
+            if seen.insert(keep).inserted { words.append(keep) }
+        }
+        let out = Self.rulesHeader + "\n\n" + words.joined(separator: "\n") + "\n"
+        try? out.write(toFile: Self.rulesPath, atomically: true, encoding: .utf8)
+        log("Migrated rules.txt to v2: \(words.count) canonical word(s).")
     }
 
     /// Exceptions used to live in UserDefaults — move them into the file once.
@@ -368,6 +431,9 @@ final class UserDict {
     }
 
     private static func append(_ line: String, to path: String) {
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
         guard let handle = FileHandle(forWritingAtPath: path) else { return }
         defer { try? handle.close() }
         handle.seekToEndOfFile()
@@ -470,13 +536,14 @@ final class Engine {
     private var frontAppID: String = ""
     private let enN = enAlphabet.count + 1
     private let ruN = ruAlphabet.count + 1
-    let dict = UserDict()
+    let dict: UserDict
 
     /// Notifies the UI layer (status bar) that state worth showing changed.
     var onActivity: ((String) -> Void)?
 
     init(layouts: Layouts) {
         self.layouts = layouts
+        self.dict = UserDict(converting: { layouts.converted($0) })
     }
 
     // MARK: Lifecycle
@@ -745,7 +812,10 @@ final class Engine {
         let ownWord = readWord(coreKeys, current: current)
         guard !dict.exceptions.contains(ownWord.lowercased()) else { return nil }
 
-        if !dict.rules.contains(ownWord.lowercased()) {
+        // Rules hold canonical words: the fix fires when its RESULT is a
+        // listed word («и» listed → "b" typed in en gets fixed to «и»).
+        let fixedWord = readWord(coreKeys, current: target)
+        if !dict.rules.contains(fixedWord.lowercased()) {
             guard coreKeys.count >= minWordLength else { return nil }
             let codes = coreKeys.map { $0.code }
             let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
@@ -1266,7 +1336,7 @@ final class DictionaryWindowController: NSObject, NSWindowDelegate,
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.heightAnchor.constraint(equalToConstant: 300).isActive = true
 
-        addField.placeholderString = "слово как набрано: b, yt, еру…"
+        addField.placeholderString = "слово: в, так, the…"
         addField.font = .systemFont(ofSize: 13)
         addField.target = self
         addField.action = #selector(addClicked) // Enter in the field adds
@@ -1313,10 +1383,12 @@ final class DictionaryWindowController: NSObject, NSWindowDelegate,
     private func reloadData() {
         words = (showingRules ? dict.rules : dict.exceptions).sorted()
         infoLabel.stringValue = showingRules
-            ? "Исправляются всегда, даже короткие: латинские строки — en→ru, "
-              + "кириллические — ru→en. Хранится в rules.txt и синкается через dotfiles."
-            : "Не исправляются никогда. Backspace сразу после автозамены "
-              + "отменяет её и добавляет слово сюда."
+            ? "Настоящие слова, которые всегда восстанавливаются из опечатки: "
+              + "кириллические — en→ru («и» ← \"b\"), латинские — ru→en (\"the\" ← «еру»)."
+            : "Не исправляются никогда (как набрано). Backspace сразу после "
+              + "автозамены отменяет её и добавляет слово сюда."
+        table.tableColumns[0].title = showingRules ? "Слово" : "Как набрано"
+        table.tableColumns[1].title = showingRules ? "Опечатка в чужой раскладке" : "В другой раскладке"
         table.reloadData()
         removeButton.isEnabled = false
     }
@@ -1642,13 +1714,14 @@ if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
     print("en reading: \"\(render(layouts.enChars))\"  score \(fmt(enScore))")
     print("ru reading: \"\(render(layouts.ruChars))\"  score \(fmt(ruScore))")
 
-    let dict = UserDict()
+    let dict = UserDict(converting: { layouts.converted($0) })
     for reading in [render(layouts.enChars), render(layouts.ruChars)] {
         if dict.rules.contains(reading.lowercased()) {
-            print("dictionary: \"\(reading)\" matches a RULE — always fixed")
+            print("dictionary: \"\(reading)\" is a RULE word — " +
+                  "typing \"\(layouts.converted(reading))\" always fixes to it")
         }
         if dict.exceptions.contains(reading.lowercased()) {
-            print("dictionary: \"\(reading)\" is an EXCEPTION — never fixed")
+            print("dictionary: \"\(reading)\" is an EXCEPTION — never fixed when typed")
         }
     }
     if let en = enScore, let ru = ruScore {
