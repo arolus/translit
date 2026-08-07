@@ -46,7 +46,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           V="${{ steps.version.outputs.version }}"
-          gh release create "v$V" Translit.app.zip \
+          if ! gh release create "v$V" Translit.app.zip \
             --repo "$GITHUB_REPOSITORY" \
             --title "Translit $V" \
             --notes "Automated build of version $V. Unzip and run, or let the in-app updater install it."
+          then
+            # Two mirror pushes can race into two runs; losing the race to an
+            # identical release is fine — anything else is a real failure.
+            gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null
+            echo "Release v$V already created by a concurrent run."
+          fi
