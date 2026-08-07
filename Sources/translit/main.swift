@@ -730,7 +730,6 @@ final class Engine {
 /// picks the permission up as soon as it is granted.
 final class Updater {
     static let releasesRepo = "arolus/translit"
-    static let latestReleaseAPI = "https://api.github.com/repos/\(releasesRepo)/releases/latest"
 
     /// Latest version seen on GitHub — lets the menu offer "Обновить до X".
     private(set) static var latestKnown: String?
