@@ -1,0 +1,52 @@
+name: Release
+
+# Builds Translit.app and publishes a GitHub Release for the version in the
+# VERSION file, unless that release already exists. The in-app updater
+# installs from these releases.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the release already exists
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.version }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Translit.app
+        if: steps.exists.outputs.exists == 'false'
+        run: ./build.sh
+
+      - name: Zip the bundle
+        if: steps.exists.outputs.exists == 'false'
+        run: ditto -c -k --keepParent Translit.app Translit.app.zip
+
+      - name: Publish release
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          gh release create "v$V" Translit.app.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Translit $V" \
+            --notes "Automated build of version $V. Unzip and run, or let the in-app updater install it."

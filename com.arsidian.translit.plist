@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.arsidian.translit</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__TRANSLIT_BIN__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- false: "Quit" from the menu must really quit until the next login,
+         not get resurrected by launchd. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__TRANSLIT_LOGS__/translit.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__TRANSLIT_LOGS__/translit.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
