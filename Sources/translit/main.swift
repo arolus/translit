@@ -790,9 +790,19 @@ final class Engine {
         guard !Settings.excludedApps.contains(frontAppID) else { return nil }
         // Password fields enable secure input; never touch those.
         guard !IsSecureEventInputEnabled() else { return nil }
+        return decide(word: word, separator: separator, current: layouts.current)
+    }
 
-        let current = layouts.current
-        guard current == .en || current == .ru else { return nil }
+    /// The decision itself, free of environment checks so `--test` can run
+    /// exactly what the engine runs (a separate test-only reimplementation
+    /// used to drift from this one). `explanation` receives a human-readable
+    /// trace of why the verdict came out the way it did.
+    func decide(word: [Key], separator: Key, current: Layouts.Current,
+                explanation: ((String) -> Void)? = nil) -> Correction? {
+        guard current == .en || current == .ru else {
+            explanation?("active layout is neither en nor ru — nothing to do")
+            return nil
+        }
         let target: Layouts.Current = current == .en ? .ru : .en
 
         // Keys at the word's tail that produce no letter in the CURRENT
@@ -807,16 +817,28 @@ final class Engine {
             trailingKeys.insert(last, at: 0)
             coreKeys.removeLast()
         }
-        guard !coreKeys.isEmpty else { return nil }
+        guard !coreKeys.isEmpty else {
+            explanation?("the token is punctuation only")
+            return nil
+        }
 
         let ownWord = readWord(coreKeys, current: current)
-        guard !dict.exceptions.contains(ownWord.lowercased()) else { return nil }
+        guard !dict.exceptions.contains(ownWord.lowercased()) else {
+            explanation?("\"\(ownWord)\" is in exceptions.txt — never fixed")
+            return nil
+        }
 
         // Rules hold canonical words: the fix fires when its RESULT is a
         // listed word («и» listed → "b" typed in en gets fixed to «и»).
         let fixedWord = readWord(coreKeys, current: target)
-        if !dict.rules.contains(fixedWord.lowercased()) {
-            guard coreKeys.count >= minWordLength else { return nil }
+        if dict.rules.contains(fixedWord.lowercased()) {
+            explanation?("\"\(fixedWord)\" is a rule word — fixed regardless of scores")
+        } else {
+            guard coreKeys.count >= minWordLength else {
+                explanation?("no rule for \"\(fixedWord)\" and the word is shorter than " +
+                             "\(minWordLength) letters — statistics can't decide, left alone")
+                return nil
+            }
             let codes = coreKeys.map { $0.code }
             let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
                                        table: enBigrams, n: enN)
@@ -824,8 +846,17 @@ final class Engine {
                                        table: ruBigrams, n: ruN)
             let (own, other) = current == .en ? (enScore, ruScore) : (ruScore, enScore)
 
-            guard let otherScore = other, otherScore >= plausibilityFloor else { return nil }
-            if let ownScore = own, otherScore - ownScore < switchMargin { return nil }
+            guard let otherScore = other, otherScore >= plausibilityFloor else {
+                explanation?("the other reading is impossible or implausible — left alone")
+                return nil
+            }
+            if let ownScore = own, otherScore - ownScore < switchMargin {
+                explanation?(String(format: "scores too close (own %.1f vs other %.1f, " +
+                                            "need +%.0f) — left alone",
+                                    ownScore, otherScore, switchMargin))
+                return nil
+            }
+            explanation?("statistics: \"\(fixedWord)\" wins clearly")
         }
 
         let ownMap = current == .en ? layouts.enChars : layouts.ruChars
@@ -1545,7 +1576,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
             menu.addItem(.separator())
 
-            let dictionary = NSMenuItem(title: "Словарь…",
+            // The rule count doubles as a health check: "0 правил" says the
+            // dictionary never loaded, which looks the same from the outside
+            // as corrections not working.
+            let ruleCount = engine?.dict.rules.count ?? 0
+            let dictionary = NSMenuItem(title: "Словарь… (\(ruleCount) правил)",
                                         action: #selector(openDictionary), keyEquivalent: "d")
             dictionary.target = self
             menu.addItem(dictionary)
@@ -1714,14 +1749,23 @@ if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
     print("en reading: \"\(render(layouts.enChars))\"  score \(fmt(enScore))")
     print("ru reading: \"\(render(layouts.ruChars))\"  score \(fmt(ruScore))")
 
-    let dict = UserDict(converting: { layouts.converted($0) })
-    for reading in [render(layouts.enChars), render(layouts.ruChars)] {
-        if dict.rules.contains(reading.lowercased()) {
-            print("dictionary: \"\(reading)\" is a RULE word — " +
-                  "typing \"\(layouts.converted(reading))\" always fixes to it")
-        }
-        if dict.exceptions.contains(reading.lowercased()) {
-            print("dictionary: \"\(reading)\" is an EXCEPTION — never fixed when typed")
+    // Run the ENGINE's own decision for both layouts — what would happen if
+    // these keys were typed with en active, and with ru active.
+    let engine = Engine(layouts: layouts)
+    let keys = codes.map { Key(code: $0, shift: false) }
+    let space = Key(code: 49, shift: false)
+    print("")
+    for current in [Layouts.Current.en, Layouts.Current.ru] {
+        let typed = current == .en ? render(layouts.enChars) : render(layouts.ruChars)
+        var why = ""
+        let verdict = engine.decide(word: keys, separator: space, current: current) { why = $0 }
+        let name = current == .en ? "en" : "ru"
+        if let verdict = verdict {
+            let fixed = current == .en ? render(layouts.ruChars) : render(layouts.enChars)
+            print("typed with \(name) active → \"\(typed)\" IS FIXED to " +
+                  "\"\(fixed)\(verdict.trailingText)\"  (\(why))")
+        } else {
+            print("typed with \(name) active → \"\(typed)\" is left alone  (\(why))")
         }
     }
     if let en = enScore, let ru = ruScore {
