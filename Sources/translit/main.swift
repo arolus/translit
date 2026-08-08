@@ -323,17 +323,45 @@ final class UserDict {
         load()
     }
 
+    /// True when the config dir is a symlink whose target is missing — the
+    /// dotfiles checkout it pointed at was moved or never existed on this
+    /// machine. Every read and write then fails silently, leaving the app
+    /// with an empty dictionary and no visible reason.
+    private static func repairBrokenSymlink() {
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: dirPath),
+              attrs[.type] as? FileAttributeType == .typeSymbolicLink else { return }
+        let target = (try? fm.destinationOfSymbolicLink(atPath: dirPath)) ?? "?"
+        let resolved = target.hasPrefix("/")
+            ? target
+            : (dirPath as NSString).deletingLastPathComponent + "/" + target
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: resolved, isDirectory: &isDir), isDir.boolValue { return }
+        log("⚠️ \(dirPath) points at a missing \(resolved) — replacing it with a real folder.")
+        try? fm.removeItem(atPath: dirPath)
+    }
+
     private func ensureFiles() {
         let fm = FileManager.default
-        try? fm.createDirectory(atPath: Self.dirPath, withIntermediateDirectories: true)
+        Self.repairBrokenSymlink()
+        do {
+            try fm.createDirectory(atPath: Self.dirPath, withIntermediateDirectories: true)
+        } catch {
+            log("⚠️ Cannot create \(Self.dirPath): \(error.localizedDescription)")
+        }
         let exceptionsHeader = """
         # Translit exceptions: never auto-fix these words. One word per line,
         # spelled as typed (the reading in the layout that was active).
         # Backspace right after an auto-fix reverts it and appends the word here.
         """
         if !fm.fileExists(atPath: Self.rulesPath) {
-            try? Self.defaultRulesContent.write(toFile: Self.rulesPath, atomically: true,
-                                                encoding: .utf8)
+            do {
+                try Self.defaultRulesContent.write(toFile: Self.rulesPath, atomically: true,
+                                                   encoding: .utf8)
+                log("Seeded \(Self.rulesPath) with \(Self.defaultRuleWords.count) default rules.")
+            } catch {
+                log("⚠️ Cannot write \(Self.rulesPath): \(error.localizedDescription)")
+            }
         }
         if !fm.fileExists(atPath: Self.exceptionsPath) {
             try? (exceptionsHeader + "\nеще\n").write(toFile: Self.exceptionsPath,
@@ -383,6 +411,24 @@ final class UserDict {
     private func load() {
         rules = Self.parse(Self.rulesPath)
         exceptions = Self.parse(Self.exceptionsPath)
+        // An unreadable or unwritable config dir used to leave the app with
+        // no rules at all and no hint why. Short words are exactly what the
+        // statistics cannot decide, so fall back to the built-in set: worst
+        // case the file stays broken, but corrections still work.
+        if rules.isEmpty {
+            // Try to heal the file itself; fall back to memory if even that
+            // fails, so a broken config can never disarm the dictionary.
+            do {
+                try Self.defaultRulesContent.write(toFile: Self.rulesPath, atomically: true,
+                                                   encoding: .utf8)
+                rules = Self.parse(Self.rulesPath)
+                log("\(Self.rulesPath) had no rules — reseeded with the defaults.")
+            } catch {
+                log("⚠️ \(Self.rulesPath) has no rules and cannot be rewritten " +
+                    "(\(error.localizedDescription)) — using the built-in set in memory.")
+            }
+            if rules.isEmpty { rules = Set(Self.defaultRuleWords) }
+        }
         log("Dictionary: \(rules.count) rule(s), \(exceptions.count) exception(s).")
         watchers.forEach { $0.cancel() }
         watchers = [Self.dirPath, Self.rulesPath, Self.exceptionsPath].compactMap { watch($0) }
@@ -406,6 +452,12 @@ final class UserDict {
         exceptions.insert(lower)
         Self.append(lower, to: Self.exceptionsPath)
         onChange?()
+    }
+
+    /// True when the rules file cannot be written — the UI says so instead of
+    /// pretending an edit was saved.
+    var storageIsWritable: Bool {
+        FileManager.default.isWritableFile(atPath: Self.rulesPath)
     }
 
     func addRule(_ word: String) {
@@ -1413,11 +1465,15 @@ final class DictionaryWindowController: NSObject, NSWindowDelegate,
 
     private func reloadData() {
         words = (showingRules ? dict.rules : dict.exceptions).sorted()
-        infoLabel.stringValue = showingRules
+        let base = showingRules
             ? "Настоящие слова, которые всегда восстанавливаются из опечатки: "
               + "кириллические — en→ru («и» ← \"b\"), латинские — ru→en (\"the\" ← «еру»)."
             : "Не исправляются никогда (как набрано). Backspace сразу после "
               + "автозамены отменяет её и добавляет слово сюда."
+        // Name the storage: an unwritable file is why edits "don't stick".
+        infoLabel.stringValue = dict.storageIsWritable
+            ? base
+            : base + "\n⚠️ Файл \(UserDict.dirPath) недоступен для записи — правки не сохранятся."
         table.tableColumns[0].title = showingRules ? "Слово" : "Как набрано"
         table.tableColumns[1].title = showingRules ? "Опечатка в чужой раскладке" : "В другой раскладке"
         table.reloadData()
