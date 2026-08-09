@@ -997,14 +997,28 @@ final class Engine {
                 return nil
             }
 
-            // Being a real word outranks any score: bigrams happily rate
-            // "inere" above «штуку», but only one of the two is a word.
+            // Being a real word outranks any score — in both directions.
+            // Bigrams rate "inere" above «штуку», and rate the real «абзац»
+            // (-23.0) below the plausibility floor, so the word list has to
+            // be consulted BEFORE the thresholds, not after them.
             let ownIsWord = KnownWords.isKnown(ownWord.lowercased(), language: current)
             let fixedIsWord = KnownWords.isKnown(fixedWord.lowercased(), language: target)
             if ownIsWord && !fixedIsWord {
                 explanation?("\"\(ownWord)\" is a known word and \"\(fixedWord)\" is not — " +
                              "left alone")
                 return nil
+            }
+            // Measured over 194k dictionary words: letting the list decide
+            // for every word we consider beats gating it by length on both
+            // axes (98.3%/98.1% rescued at 0.09%/0.16% false fixes).
+            if fixedIsWord && !ownIsWord {
+                explanation?("\"\(fixedWord)\" is a known word, \"\(ownWord)\" is not")
+                return Correction(coreKeys: coreKeys,
+                                  leadingText: renderPunctuation(leadingKeys, current: current),
+                                  trailingText: renderPunctuation(trailingKeys, current: current),
+                                  originalKeys: word, separator: separator,
+                                  originalLayout: current, fixedLayout: target,
+                                  originalWord: ownWord)
             }
 
             let codes = coreKeys.map { $0.code }
@@ -1018,18 +1032,13 @@ final class Engine {
                 explanation?("the other reading is impossible or implausible — left alone")
                 return nil
             }
-            // A known target that the typed text isn't: the word list has
-            // already decided, the margin would only veto correct fixes.
-            if fixedIsWord && !ownIsWord {
-                explanation?("\"\(fixedWord)\" is a known word, \"\(ownWord)\" is not")
-            } else if let ownScore = own, otherScore - ownScore < switchMargin {
+            if let ownScore = own, otherScore - ownScore < switchMargin {
                 explanation?(String(format: "scores too close (own %.1f vs other %.1f, " +
                                             "need +%.0f) — left alone",
                                     ownScore, otherScore, switchMargin))
                 return nil
-            } else {
-                explanation?("statistics: \"\(fixedWord)\" wins clearly")
             }
+            explanation?("statistics: \"\(fixedWord)\" wins clearly")
         }
 
         return Correction(coreKeys: coreKeys,

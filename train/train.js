@@ -25,8 +25,8 @@ const path = require('path');
 // runtime also asks "is this an actual word?". ~30k words per language at
 // ~1% false positives fits in ~36 KB each, emitted as base64.
 const BLOOM_WORDS = 50000;
-const BLOOM_BITS_PER_WORD = 10;
-const BLOOM_HASHES = 7;
+const BLOOM_BITS_PER_WORD = 16;
+const BLOOM_HASHES = 11;
 
 const EN = 'abcdefghijklmnopqrstuvwxyz'; // 26, index 1..26; 0 = boundary
 const RU = 'абвгдежзийклмнопрстуфхцчшщъыьэюяё'; // 33, index 1..33; 0 = boundary

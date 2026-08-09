@@ -18,9 +18,15 @@ you are. Resident footprint is a few megabytes.
 3. Each reading is scored with bigram log-probability tables baked into the
    binary (`Sources/translit/Bigrams.swift`, ~2 KB). A reading containing a
    non-letter key (e.g. `;`) is impossible for that language.
-4. The alternative layout wins when its reading beats the typed one by
-   `switchMargin` (1 bit per character) and is itself plausible
-   (`plausibilityFloor`). Then: the separator keystroke is swallowed, the word
+4. **Is it a word?** Bloom filters over the 50k most frequent words of each
+   language (98 KB each, same file) answer this, and their verdict outranks
+   the scores in both directions — bigrams rate the meaningless "inere"
+   above «штуку», and rate the real «абзац» below the plausibility floor.
+   A fix fires when the result is a known word and the typed text is not,
+   and is refused in the mirror case.
+5. When neither reading is a known word, the alternative layout wins only if
+   it beats the typed one by `switchMargin` (1 bit per character) and is
+   itself plausible (`plausibilityFloor`). Then: the separator keystroke is swallowed, the word
    is erased with synthetic Backspaces, `TISSelectInputSource` switches the
    layout, the word and the separator are retyped. Works for Enter too — the
    fix happens *before* the Enter is delivered, so chat messages go out
@@ -121,6 +127,27 @@ node train/train.js /usr/share/dict/words ~/Projects/**/*.md
 It also prints held-out validation accuracy and the score-gap percentiles the
 `switchMargin`/`plausibilityFloor` constants in `main.swift` were picked from
 (~99.3% accuracy on the current corpus in both directions).
+
+## Measuring against real dictionaries
+
+`--eval <wordlist> <ru|en>` runs the engine's actual decision over a word
+list, twice per word: typed correctly (any fix is a false positive) and
+typed with the other layout active (a fix is the point). Add `--verbose` for
+examples of both kinds of miss.
+
+Against Hunspell dictionaries (194k words, none of which the thresholds were
+tuned on):
+
+| corpus | wrongly changed | rescued |
+|---|---|---|
+| ru_RU.dic, 146k words | 0.09% | 98.3% |
+| en_US.dic, 48k words | 0.16% | 98.1% |
+
+The residue on both axes is dominated by acronyms and abbreviations (вуз,
+квн, bbq, dj, ghz) whose wrong-layout twin is a plausible word — genuinely
+ambiguous, and what `exceptions.txt` is for. Frequency-list tails
+(OpenSubtitles 300k) score worse (~0.3% / ~95%) mostly because they are full
+of misspellings and foreign words.
 
 ## Known limitations
 
