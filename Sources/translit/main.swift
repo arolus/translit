@@ -582,6 +582,49 @@ func scoreReading(_ codes: [CGKeyCode], letterIndex: [Int], table: [Int8], n: In
     return Double(sum) / Double(codes.count + 1)
 }
 
+// MARK: - Known words
+
+/// Bloom filters over the 50k most frequent words of each language, baked
+/// into the binary (see Bigrams.swift). Bigram scores alone cannot tell a
+/// real word from a string of frequent letter pairs — «штуку» (-19.2) lost
+/// to the meaningless "inere" (-11.7) — so the decision also asks whether a
+/// reading is an actual word. False positives measured on wrong-layout
+/// garbage: ~1.9% (en), ~1.5% (ru); false negatives are impossible.
+enum KnownWords {
+    private static let enBits = [UInt8](Data(base64Encoded: enBloomBase64) ?? Data())
+    private static let ruBits = [UInt8](Data(base64Encoded: ruBloomBase64) ?? Data())
+
+    /// FNV-1a + djb2 double hashing — must match train/train.js bit for bit.
+    private static func hashes(_ word: String, bitCount: Int) -> [Int] {
+        var h1: UInt32 = 0x811c_9dc5
+        var h2: UInt32 = 5381
+        for byte in Array(word.utf8) {
+            h1 = (h1 ^ UInt32(byte)) &* 0x0100_0193
+            h2 = h2 &* 33 &+ UInt32(byte)
+        }
+        if h2 % 2 == 0 { h2 = h2 &+ 1 }
+        return (0..<bloomHashCount).map { i in
+            Int((h1 &+ UInt32(i) &* h2) % UInt32(bitCount))
+        }
+    }
+
+    private static func contains(_ word: String, bits: [UInt8], bitCount: Int) -> Bool {
+        guard !bits.isEmpty, word.count >= 2 else { return false }
+        for bit in hashes(word, bitCount: bitCount) {
+            if bits[bit >> 3] & (1 << (bit & 7)) == 0 { return false }
+        }
+        return true
+    }
+
+    static func isKnown(_ word: String, language: Layouts.Current) -> Bool {
+        switch language {
+        case .en: return contains(word, bits: enBits, bitCount: enBloomBitCount)
+        case .ru: return contains(word, bits: ruBits, bitCount: ruBloomBitCount)
+        case .other: return false
+        }
+    }
+}
+
 // MARK: - Engine
 
 /// One pressed key as stored in the word buffer.
@@ -619,9 +662,12 @@ final class Engine {
     private var buffer: [Key] = []
     private var tainted = false   // digits/Option chars seen — do not touch this word
     private var lastCorrection: Correction?
-    /// A fix is being applied asynchronously; incoming events pass through
-    /// untouched meanwhile (the on-screen text is in flux anyway).
+    /// A fix is being applied asynchronously. Real keystrokes that arrive
+    /// during that window are swallowed and replayed afterwards: letting them
+    /// through interleaved them with our backspaces and retyping, which is
+    /// how "ins" came back as "iins".
     private var applyingFix = false
+    private var deferredKeys: [(code: CGKeyCode, flags: CGEventFlags)] = []
     /// Recent tap-disabled-by-timeout timestamps — the thrash detector.
     private var tapDisabledTimes: [Date] = []
     /// The thrash breaker tripped; the tap stays down until the revival
@@ -786,12 +832,18 @@ final class Engine {
             return pass
         }
 
-        // While synthetic events are being posted, real keystrokes interleave
-        // with a text state that is mid-rewrite — stay out of the way.
-        if applyingFix { return pass }
-
         let code = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
+
+        // Mid-rewrite: hold the keystroke back (bounded, so a stuck fix can
+        // never eat typing) and let the fix finish first.
+        if applyingFix {
+            if deferredKeys.count < 32 {
+                deferredKeys.append((code, flags))
+                return nil
+            }
+            return pass
+        }
 
         // Command/Control chords are hotkeys, not text.
         if flags.contains(.maskCommand) || flags.contains(.maskControl) {
@@ -807,6 +859,7 @@ final class Engine {
             applyingFix = true
             DispatchQueue.main.async { [weak self] in
                 self?.undo(correction)
+                self?.flushDeferredKeys()
                 self?.applyingFix = false
             }
             return nil
@@ -847,6 +900,7 @@ final class Engine {
                     guard let self = self else { return }
                     self.applyFix(correction)
                     self.lastCorrection = correction
+                    self.flushDeferredKeys()
                     self.applyingFix = false
                 }
                 return nil // the separator is retyped as part of the fix
@@ -942,6 +996,17 @@ final class Engine {
                              "\(minWordLength) letters — statistics can't decide, left alone")
                 return nil
             }
+
+            // Being a real word outranks any score: bigrams happily rate
+            // "inere" above «штуку», but only one of the two is a word.
+            let ownIsWord = KnownWords.isKnown(ownWord.lowercased(), language: current)
+            let fixedIsWord = KnownWords.isKnown(fixedWord.lowercased(), language: target)
+            if ownIsWord && !fixedIsWord {
+                explanation?("\"\(ownWord)\" is a known word and \"\(fixedWord)\" is not — " +
+                             "left alone")
+                return nil
+            }
+
             let codes = coreKeys.map { $0.code }
             let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
                                        table: enBigrams, n: enN)
@@ -953,13 +1018,18 @@ final class Engine {
                 explanation?("the other reading is impossible or implausible — left alone")
                 return nil
             }
-            if let ownScore = own, otherScore - ownScore < switchMargin {
+            // A known target that the typed text isn't: the word list has
+            // already decided, the margin would only veto correct fixes.
+            if fixedIsWord && !ownIsWord {
+                explanation?("\"\(fixedWord)\" is a known word, \"\(ownWord)\" is not")
+            } else if let ownScore = own, otherScore - ownScore < switchMargin {
                 explanation?(String(format: "scores too close (own %.1f vs other %.1f, " +
                                             "need +%.0f) — left alone",
                                     ownScore, otherScore, switchMargin))
                 return nil
+            } else {
+                explanation?("statistics: \"\(fixedWord)\" wins clearly")
             }
-            explanation?("statistics: \"\(fixedWord)\" wins clearly")
         }
 
         return Correction(coreKeys: coreKeys,
@@ -1036,6 +1106,27 @@ final class Engine {
         guard let source = makeSource() else { return }
         for key in keys {
             postKey(key.code, flags: key.shift ? .maskShift : [], source: source)
+        }
+    }
+
+    /// Re-posts the keystrokes typed during a fix, in order, after it. They
+    /// go out UNMARKED so they re-enter the tap and get buffered normally —
+    /// otherwise the word the user is typing right now would be invisible to
+    /// the next decision.
+    private func flushDeferredKeys() {
+        let keys = deferredKeys
+        deferredKeys.removeAll(keepingCapacity: true)
+        guard !keys.isEmpty, let source = CGEventSource(stateID: .combinedSessionState) else {
+            return
+        }
+        for key in keys {
+            for isDown in [true, false] {
+                guard let event = CGEvent(keyboardEventSource: source,
+                                          virtualKey: key.code, keyDown: isDown) else { continue }
+                event.flags = key.flags
+                event.post(tap: .cghidEventTap)
+            }
+            usleep(keystrokeGapMicroseconds)
         }
     }
 
