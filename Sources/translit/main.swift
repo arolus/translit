@@ -120,6 +120,10 @@ final class Layouts {
     /// Lowercase character produced by each keycode (0..<128) with no modifiers.
     let enChars: [Character?]
     let ruChars: [Character?]
+    /// Same, with Shift held — punctuation is retyped verbatim, and `"` must
+    /// not come back as `'`.
+    let enCharsShift: [Character?]
+    let ruCharsShift: [Character?]
     /// Alphabet index per keycode for the scorer: 1-based letter index,
     /// -1 = the key does not produce a letter in that alphabet.
     let enLetterIndex: [Int]
@@ -145,6 +149,8 @@ final class Layouts {
         ruSourceID = ruID
         enChars = Layouts.keycodeMap(for: en)
         ruChars = Layouts.keycodeMap(for: ru)
+        enCharsShift = Layouts.keycodeMap(for: en, shift: true)
+        ruCharsShift = Layouts.keycodeMap(for: ru, shift: true)
         enLetterIndex = Layouts.letterIndexes(chars: enChars, alphabet: enAlphabet)
         ruLetterIndex = Layouts.letterIndexes(chars: ruChars, alphabet: ruAlphabet)
         refreshCurrent()
@@ -212,14 +218,15 @@ final class Layouts {
         return nil
     }
 
-    /// keycode → character with no modifiers, via UCKeyTranslate.
-    private static func keycodeMap(for source: TISInputSource) -> [Character?] {
+    /// keycode → character, via UCKeyTranslate (optionally with Shift).
+    private static func keycodeMap(for source: TISInputSource, shift: Bool = false) -> [Character?] {
         var map = [Character?](repeating: nil, count: 128)
         guard let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
             return map
         }
         let data = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue() as Data
         let kbdType = UInt32(LMGetKbdType())
+        let modifiers = shift ? UInt32(shiftKey >> 8) : 0
         data.withUnsafeBytes { buf in
             guard let layout = buf.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self)
             else { return }
@@ -228,7 +235,8 @@ final class Layouts {
                 var length = 0
                 var chars = [UniChar](repeating: 0, count: 4)
                 let status = UCKeyTranslate(layout, CGKeyCode(code), UInt16(kUCKeyActionDown),
-                                            0, kbdType, OptionBits(kUCKeyTranslateNoDeadKeysBit),
+                                            modifiers, kbdType,
+                                            OptionBits(kUCKeyTranslateNoDeadKeysBit),
                                             &dead, chars.count, &length, &chars)
                 guard status == noErr, length == 1,
                       let scalar = UnicodeScalar(chars[0]),
@@ -552,9 +560,12 @@ struct Key {
 struct Correction {
     /// The fixable token, as typed — replayed by keycode in the new layout.
     let coreKeys: [Key]
-    /// Word-final punctuation as it read in the ORIGINAL layout ("flight," —
-    /// the comma); retyped verbatim as unicode after the fix, because its
-    /// keycode would produce a different character in the new layout.
+    /// Punctuation wrapping the word as it read in the ORIGINAL layout
+    /// (the quotes in "change", the comma in "flight,"); retyped verbatim as
+    /// unicode, because those keycodes mean other characters in the new
+    /// layout — and are letters in Russian, which is why they must not be
+    /// scored as part of the word.
+    let leadingText: String
     let trailingText: String
     /// Core + trailing keys — undo replays these in the original layout.
     let originalKeys: [Key]
@@ -857,17 +868,23 @@ final class Engine {
         }
         let target: Layouts.Current = current == .en ? .ru : .en
 
-        // Keys at the word's tail that produce no letter in the CURRENT
-        // layout are word-final punctuation of the on-screen text, not part
-        // of the token: the comma key is a Russian б, so "flight," used to
-        // read as "impossible English" and lose to garbage Russian by
-        // default. Judge the core only; the tail is retyped verbatim.
+        // Keys at either end that produce no letter in the CURRENT layout are
+        // punctuation around the word, not part of the token. Both the comma
+        // key (Russian б) and the quote key (Russian э) are letters in the
+        // other layout, so «"change"» and «flight,» used to read as
+        // "impossible English" and lose to garbage Russian by default.
+        // Judge the core only; the wrapping is retyped verbatim.
         let ownLetterIndex = current == .en ? layouts.enLetterIndex : layouts.ruLetterIndex
         var coreKeys = word
+        var leadingKeys: [Key] = []
         var trailingKeys: [Key] = []
         while let last = coreKeys.last, ownLetterIndex[Int(last.code)] <= 0 {
             trailingKeys.insert(last, at: 0)
             coreKeys.removeLast()
+        }
+        while let first = coreKeys.first, ownLetterIndex[Int(first.code)] <= 0 {
+            leadingKeys.append(first)
+            coreKeys.removeFirst()
         }
         guard !coreKeys.isEmpty else {
             explanation?("the token is punctuation only")
@@ -911,9 +928,9 @@ final class Engine {
             explanation?("statistics: \"\(fixedWord)\" wins clearly")
         }
 
-        let ownMap = current == .en ? layouts.enChars : layouts.ruChars
-        let trailingText = String(trailingKeys.compactMap { ownMap[Int($0.code)] })
-        return Correction(coreKeys: coreKeys, trailingText: trailingText,
+        return Correction(coreKeys: coreKeys,
+                          leadingText: renderPunctuation(leadingKeys, current: current),
+                          trailingText: renderPunctuation(trailingKeys, current: current),
                           originalKeys: word, separator: separator,
                           originalLayout: current, fixedLayout: target,
                           originalWord: ownWord)
@@ -924,6 +941,16 @@ final class Engine {
         return String(word.compactMap { map[Int($0.code)] })
     }
 
+    /// Punctuation as it appears on screen — Shift matters here (`"` vs `'`).
+    private func renderPunctuation(_ keys: [Key], current: Layouts.Current) -> String {
+        let plain = current == .en ? layouts.enChars : layouts.ruChars
+        let shifted = current == .en ? layouts.enCharsShift : layouts.ruCharsShift
+        return String(keys.compactMap { key in
+            (key.shift ? shifted[Int(key.code)] : plain[Int(key.code)])
+                ?? plain[Int(key.code)]
+        })
+    }
+
     /// Erases the word, switches layout, retypes word + separator.
     /// The separator was swallowed, so only the word itself is on screen.
     /// Runs asynchronously on the main queue, never inside the tap callback.
@@ -931,6 +958,7 @@ final class Engine {
         postBackspaces(correction.originalKeys.count)
         layouts.select(correction.fixedLayout)
         usleep(layoutSettleMicroseconds)
+        typeText(correction.leadingText)
         replay(correction.coreKeys)
         typeText(correction.trailingText)
         replay([correction.separator])
@@ -943,8 +971,9 @@ final class Engine {
     /// Reverts a fix: erases the retyped word + separator, restores the
     /// original layout, retypes the original keys, remembers the exception.
     private func undo(_ correction: Correction) {
-        // On screen: core (fixed layout) + trailing text + separator.
-        postBackspaces(correction.coreKeys.count + correction.trailingText.count + 1)
+        // On screen: leading text + core (fixed layout) + trailing + separator.
+        postBackspaces(correction.leadingText.count + correction.coreKeys.count
+                       + correction.trailingText.count + 1)
         layouts.select(correction.originalLayout)
         usleep(layoutSettleMicroseconds)
         replay(correction.originalKeys)
@@ -1782,18 +1811,27 @@ if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
     guard let layouts = Layouts() else { exit(1) }
     let word = args[flagIndex + 1].lowercased()
 
-    var keycodeFor: [Character: CGKeyCode] = [:]
-    for code in 0..<128 {
-        if let ch = layouts.enChars[code] { keycodeFor[ch] = keycodeFor[ch] ?? CGKeyCode(code) }
-        if let ch = layouts.ruChars[code] { keycodeFor[ch] = keycodeFor[ch] ?? CGKeyCode(code) }
+    // Unshifted first so a character available without Shift never resolves
+    // to a shifted combo; shifted maps cover `"`, `?`, `!` and friends.
+    var keycodeFor: [Character: (code: CGKeyCode, shift: Bool)] = [:]
+    for (maps, shift) in [([layouts.enChars, layouts.ruChars], false),
+                          ([layouts.enCharsShift, layouts.ruCharsShift], true)] {
+        for map in maps {
+            for code in 0..<128 {
+                guard let ch = map[code], keycodeFor[ch] == nil else { continue }
+                keycodeFor[ch] = (CGKeyCode(code), shift)
+            }
+        }
     }
     var codes: [CGKeyCode] = []
+    var shifts: [Bool] = []
     for ch in word {
-        guard let code = keycodeFor[ch] else {
+        guard let stroke = keycodeFor[ch] else {
             print("no key produces \"\(ch)\" in either layout")
             exit(1)
         }
-        codes.append(code)
+        codes.append(stroke.code)
+        shifts.append(stroke.shift)
     }
 
     let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
@@ -1817,9 +1855,10 @@ if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
         let verdict = engine.decide(word: keys, separator: space, current: current) { why = $0 }
         let name = current == .en ? "en" : "ru"
         if let verdict = verdict {
-            let fixed = current == .en ? render(layouts.ruChars) : render(layouts.enChars)
+            let coreMap = current == .en ? layouts.ruChars : layouts.enChars
+            let core = String(verdict.coreKeys.compactMap { coreMap[Int($0.code)] })
             print("typed with \(name) active → \"\(typed)\" IS FIXED to " +
-                  "\"\(fixed)\(verdict.trailingText)\"  (\(why))")
+                  "\"\(verdict.leadingText)\(core)\(verdict.trailingText)\"  (\(why))")
         } else {
             print("typed with \(name) active → \"\(typed)\" is left alone  (\(why))")
         }
