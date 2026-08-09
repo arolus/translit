@@ -1838,19 +1838,26 @@ if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
                                table: enBigrams, n: enAlphabet.count + 1)
     let ruScore = scoreReading(codes, letterIndex: layouts.ruLetterIndex,
                                table: ruBigrams, n: ruAlphabet.count + 1)
-    let render = { (map: [Character?]) in String(codes.compactMap { map[Int($0)] }) }
+    // Shift-aware so the echo matches what is really on screen (`"`, not `'`).
+    let render = { (plain: [Character?], shifted: [Character?]) in
+        String(zip(codes, shifts).compactMap { code, shift in
+            (shift ? shifted[Int(code)] : plain[Int(code)]) ?? plain[Int(code)]
+        })
+    }
+    let renderEn = { render(layouts.enChars, layouts.enCharsShift) }
+    let renderRu = { render(layouts.ruChars, layouts.ruCharsShift) }
     let fmt = { (s: Double?) in s.map { String(format: "%.2f", $0) } ?? "impossible" }
-    print("en reading: \"\(render(layouts.enChars))\"  score \(fmt(enScore))")
-    print("ru reading: \"\(render(layouts.ruChars))\"  score \(fmt(ruScore))")
+    print("en reading: \"\(renderEn())\"  score \(fmt(enScore))")
+    print("ru reading: \"\(renderRu())\"  score \(fmt(ruScore))")
 
     // Run the ENGINE's own decision for both layouts — what would happen if
     // these keys were typed with en active, and with ru active.
     let engine = Engine(layouts: layouts)
-    let keys = codes.map { Key(code: $0, shift: false) }
+    let keys = zip(codes, shifts).map { Key(code: $0, shift: $1) }
     let space = Key(code: 49, shift: false)
     print("")
     for current in [Layouts.Current.en, Layouts.Current.ru] {
-        let typed = current == .en ? render(layouts.enChars) : render(layouts.ruChars)
+        let typed = current == .en ? renderEn() : renderRu()
         var why = ""
         let verdict = engine.decide(word: keys, separator: space, current: current) { why = $0 }
         let name = current == .en ? "en" : "ru"
