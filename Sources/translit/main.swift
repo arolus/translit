@@ -35,9 +35,17 @@ let minWordLength = 3
 /// much per character (scaled log2 units; 4 = 1 bit/char). Picked from the
 /// validation gap percentiles printed by train/train.js.
 let switchMargin = 4.0
-/// Never switch TO a reading that is itself implausible (garbage in both
-/// layouts). Average scaled log2 per transition; -32 = 8 bits per char.
-let plausibilityFloor = -32.0
+/// Never switch TO a reading that is itself implausible — a fix must produce
+/// something word-like, not merely something better than the typo. Average
+/// scaled log2 per transition.
+///
+/// Calibrated on the 200 most frequent words of each language versus the
+/// wrong-layout projections of the other language's 200 (see train/corpus):
+/// real words bottom out at -23.2 (ru) and -19.8 (en), while three quarters
+/// of the garbage sits below -23. At -22 nothing real is lost and ~80% of
+/// garbage is blocked — including "xlsx" → «чдыч» (-28.4), which the old
+/// -32 floor waved through because it only had to beat a worse typo.
+let plausibilityFloor = -22.0
 /// Pause after TISSelectInputSource before retyping: layout changes are
 /// applied asynchronously and early keystrokes would use the old layout.
 let layoutSettleMicroseconds: UInt32 = 60_000
@@ -278,6 +286,20 @@ final class UserDict {
     static let rulesPath = dirPath + "/rules.txt"
     static let exceptionsPath = dirPath + "/exceptions.txt"
     static let formatMarker = "# translit-rules v2"
+    static let exceptionsMarker = "# translit-exceptions v2"
+
+    /// Technical tokens typed in English whose Russian projection is a
+    /// perfectly plausible letter sequence — "csv" → «сым» scores like a real
+    /// three-letter word, so no statistical threshold can tell them apart.
+    /// Short file extensions and CLI words are the whole of the problem.
+    static let defaultExceptionWords = [
+        "csv", "xls", "doc", "ppt", "txt", "pdf", "zip", "rar", "gif", "jpg",
+        "png", "svg", "mp3", "mp4", "wav", "mov", "iso", "dmg", "apk", "ipa",
+        "css", "xml", "yml", "yaml", "env", "log", "tmp", "src", "lib", "bin",
+        "dev", "app", "api", "sdk", "cli", "url", "www", "com", "org", "net",
+        "cpu", "gpu", "ram", "ssd", "usb", "dns", "vpn", "ssl", "tls", "ftp",
+        "ssh", "sql", "npm", "git", "sudo", "curl", "grep", "bash", "zsh",
+    ]
 
     /// Canonical default rules, seeded on machines without a dictionary and
     /// merged in when migrating a v1 file. Mirrors .config/translit/rules.txt
@@ -358,6 +380,7 @@ final class UserDict {
             log("⚠️ Cannot create \(Self.dirPath): \(error.localizedDescription)")
         }
         let exceptionsHeader = """
+        \(Self.exceptionsMarker)
         # Translit exceptions: never auto-fix these words. One word per line,
         # spelled as typed (the reading in the layout that was active).
         # Backspace right after an auto-fix reverts it and appends the word here.
@@ -372,8 +395,19 @@ final class UserDict {
             }
         }
         if !fm.fileExists(atPath: Self.exceptionsPath) {
-            try? (exceptionsHeader + "\nеще\n").write(toFile: Self.exceptionsPath,
-                                                      atomically: true, encoding: .utf8)
+            let body = (["еще"] + Self.defaultExceptionWords).joined(separator: "\n")
+            try? (exceptionsHeader + "\n\n" + body + "\n").write(toFile: Self.exceptionsPath,
+                                                                 atomically: true, encoding: .utf8)
+        } else if let text = try? String(contentsOfFile: Self.exceptionsPath, encoding: .utf8),
+                  !text.contains(Self.exceptionsMarker) {
+            // Existing file predates the defaults: merge them in, keeping
+            // every user entry and the file's own comments.
+            let have = Self.parse(Self.exceptionsPath)
+            let missing = Self.defaultExceptionWords.filter { !have.contains($0) }
+            let merged = Self.exceptionsMarker + "\n" + text
+                + (missing.isEmpty ? "" : "\n" + missing.joined(separator: "\n") + "\n")
+            try? merged.write(toFile: Self.exceptionsPath, atomically: true, encoding: .utf8)
+            log("Merged \(missing.count) default exception(s) into exceptions.txt.")
         }
     }
 
