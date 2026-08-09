@@ -1930,6 +1930,81 @@ if args.contains("--version") {
     exit(0)
 }
 
+// Batch evaluation: `translit --eval <file> <ru|en>` reads one word per line
+// and reports, for each, what the engine would do if that word were typed
+// with the given layout active. Two questions at scale:
+//   correct text  — how often would we wrongly "fix" a properly typed word;
+//   wrong layout  — how often would we rescue a word typed in the other one.
+// Output: a summary plus every wrong verdict, so regressions are inspectable.
+if let flagIndex = args.firstIndex(of: "--eval"), flagIndex + 2 < args.count {
+    guard let layouts = Layouts() else { exit(1) }
+    let path = args[flagIndex + 1]
+    let language: Layouts.Current = args[flagIndex + 2] == "ru" ? .ru : .en
+    let showMisses = args.contains("--verbose")
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+        print("cannot read \(path)")
+        exit(1)
+    }
+
+    var keycodeFor: [Character: (code: CGKeyCode, shift: Bool)] = [:]
+    for (maps, shift) in [([layouts.enChars, layouts.ruChars], false),
+                          ([layouts.enCharsShift, layouts.ruCharsShift], true)] {
+        for map in maps {
+            for code in 0..<128 {
+                guard let ch = map[code], keycodeFor[ch] == nil else { continue }
+                keycodeFor[ch] = (CGKeyCode(code), shift)
+            }
+        }
+    }
+
+    let engine = Engine(layouts: layouts)
+    let space = Key(code: 49, shift: false)
+    let other: Layouts.Current = language == .en ? .ru : .en
+    var correctTotal = 0, correctBroken = 0
+    var typoTotal = 0, typoRescued = 0
+    var brokenExamples: [String] = []
+    var missedExamples: [String] = []
+
+    for line in text.split(separator: "\n") {
+        let word = line.split(separator: " ").first.map(String.init)?
+            .trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+        guard word.count >= 2 else { continue }
+        var keys: [Key] = []
+        var mappable = true
+        for ch in word {
+            guard let stroke = keycodeFor[ch] else { mappable = false; break }
+            keys.append(Key(code: stroke.code, shift: stroke.shift))
+        }
+        guard mappable, !keys.isEmpty else { continue }
+
+        // Typed correctly: any fix here is a false positive.
+        correctTotal += 1
+        if engine.decide(word: keys, separator: space, current: language) != nil {
+            correctBroken += 1
+            if brokenExamples.count < 40 { brokenExamples.append(word) }
+        }
+        // Typed with the other layout active: a fix here is the whole point.
+        typoTotal += 1
+        if engine.decide(word: keys, separator: space, current: other) != nil {
+            typoRescued += 1
+        } else if missedExamples.count < 40 {
+            missedExamples.append(word)
+        }
+    }
+
+    let name = language == .en ? "en" : "ru"
+    print("\(path) [\(name)]: \(correctTotal) words")
+    print(String(format: "  typed correctly → wrongly changed: %d (%.3f%%)",
+                 correctBroken, Double(correctBroken) * 100 / Double(max(correctTotal, 1))))
+    print(String(format: "  typed in the wrong layout → rescued: %d (%.2f%%)",
+                 typoRescued, Double(typoRescued) * 100 / Double(max(typoTotal, 1))))
+    if showMisses {
+        if !brokenExamples.isEmpty { print("  wrongly changed: \(brokenExamples.joined(separator: " "))") }
+        if !missedExamples.isEmpty { print("  not rescued: \(missedExamples.joined(separator: " "))") }
+    }
+    exit(0)
+}
+
 // Debug: score a word through both layout readings without installing.
 // Example: translit --test ghbdtn   → shows both readings and the verdict.
 if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
