@@ -45,7 +45,7 @@ let switchMargin = 4.0
 /// of the garbage sits below -23. At -22 nothing real is lost and ~80% of
 /// garbage is blocked — including "xlsx" → «чдыч» (-28.4), which the old
 /// -32 floor waved through because it only had to beat a worse typo.
-let plausibilityFloor = -22.0
+let plausibilityFloor = -26.0
 /// Pause after TISSelectInputSource before retyping: layout changes are
 /// applied asynchronously and early keystrokes would use the old layout.
 let layoutSettleMicroseconds: UInt32 = 60_000
@@ -571,18 +571,28 @@ final class UserDict {
 
 // MARK: - Scoring
 
-/// Average scaled log2 probability per bigram transition of the buffer read
+/// Trigram tables decoded once at startup (~59 KB total, see Bigrams.swift).
+func decodeInt8Base64(_ base64: String) -> [Int8] {
+    guard let data = Data(base64Encoded: base64) else { return [] }
+    return data.map { Int8(bitPattern: $0) }
+}
+let enTrigrams: [Int8] = decodeInt8Base64(enTrigramsBase64)
+let ruTrigrams: [Int8] = decodeInt8Base64(ruTrigramsBase64)
+
+/// Average scaled log2 probability per trigram transition of the buffer read
 /// through one alphabet, or nil when any key is not a letter there.
 func scoreReading(_ codes: [CGKeyCode], letterIndex: [Int], table: [Int8], n: Int) -> Double? {
     var sum = 0
+    var prev2 = 0
     var prev = 0
     for code in codes {
         let cur = letterIndex[Int(code)]
         if cur < 0 { return nil }
-        sum += Int(table[prev * n + cur])
+        sum += Int(table[(prev2 * n + prev) * n + cur])
+        prev2 = prev
         prev = cur
     }
-    sum += Int(table[prev * n + 0])
+    sum += Int(table[(prev2 * n + prev) * n + 0])
     return Double(sum) / Double(codes.count + 1)
 }
 
@@ -1038,9 +1048,9 @@ final class Engine {
 
             let codes = coreKeys.map { $0.code }
             let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
-                                       table: enBigrams, n: enN)
+                                       table: enTrigrams, n: enN)
             let ruScore = scoreReading(codes, letterIndex: layouts.ruLetterIndex,
-                                       table: ruBigrams, n: ruN)
+                                       table: ruTrigrams, n: ruN)
             let (own, other) = current == .en ? (enScore, ruScore) : (ruScore, enScore)
 
             guard let otherScore = other, otherScore >= plausibilityFloor else {
@@ -2077,9 +2087,9 @@ if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
     }
 
     let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
-                               table: enBigrams, n: enAlphabet.count + 1)
+                               table: enTrigrams, n: enAlphabet.count + 1)
     let ruScore = scoreReading(codes, letterIndex: layouts.ruLetterIndex,
-                               table: ruBigrams, n: ruAlphabet.count + 1)
+                               table: ruTrigrams, n: ruAlphabet.count + 1)
     // Shift-aware so the echo matches what is really on screen (`"`, not `'`).
     let render = { (plain: [Character?], shifted: [Character?]) in
         String(zip(codes, shifts).compactMap { code, shift in
