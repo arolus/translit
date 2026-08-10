@@ -190,6 +190,10 @@ final class Layouts {
         current = which
     }
 
+    func letterIndex(for layout: Current) -> [Int] {
+        layout == .en ? enLetterIndex : ruLetterIndex
+    }
+
     /// What a word turns into on the other layout: "b" → «и», "еру" → "the".
     /// Direction is inferred from the alphabet. "?" marks unmappable chars.
     func converted(_ word: String) -> String {
@@ -962,17 +966,28 @@ final class Engine {
         // other layout, so «"change"» and «flight,» used to read as
         // "impossible English" and lose to garbage Russian by default.
         // Judge the core only; the wrapping is retyped verbatim.
-        let ownLetterIndex = current == .en ? layouts.enLetterIndex : layouts.ruLetterIndex
-        var coreKeys = word
-        var leadingKeys: [Key] = []
-        var trailingKeys: [Key] = []
-        while let last = coreKeys.last, ownLetterIndex[Int(last.code)] <= 0 {
-            trailingKeys.insert(last, at: 0)
-            coreKeys.removeLast()
-        }
-        while let first = coreKeys.first, ownLetterIndex[Int(first.code)] <= 0 {
-            leadingKeys.append(first)
-            coreKeys.removeFirst()
+        //
+        // Which keys count as punctuation depends on which layout the text
+        // was MEANT for, and that is exactly what we are trying to decide:
+        // `;` is punctuation in English but the letter ж in Russian, so
+        // stripping by the active layout turned «;tyf» into "ена". So split
+        // both ways and prefer the reading that yields a real word.
+        let ownSplit = splitPunctuation(word, letterIndex: layouts.letterIndex(for: current))
+        let targetSplit = splitPunctuation(word, letterIndex: layouts.letterIndex(for: target))
+        var (leadingKeys, coreKeys, trailingKeys) = ownSplit
+
+        // The own-layout reading only counts as counter-evidence when it is
+        // long enough to mean something: stripping «хлеб» down to "kt" left
+        // a two-letter fragment that happens to sit in the word list.
+        let ownCoreIsWord = ownSplit.core.count >= minWordLength &&
+            KnownWords.isKnown(readWord(ownSplit.core, current: current).lowercased(),
+                               language: current)
+        if targetSplit.core.count > ownSplit.core.count, !targetSplit.core.isEmpty, !ownCoreIsWord,
+           KnownWords.isKnown(readWord(targetSplit.core, current: target).lowercased(),
+                              language: target) {
+            (leadingKeys, coreKeys, trailingKeys) = targetSplit
+            explanation?("read as \(target == .ru ? "Russian" : "English") — " +
+                         "\"\(readWord(coreKeys, current: target))\" is a known word")
         }
         guard !coreKeys.isEmpty else {
             explanation?("the token is punctuation only")
@@ -1052,6 +1067,24 @@ final class Engine {
     private func readWord(_ word: [Key], current: Layouts.Current) -> String {
         let map = current == .en ? layouts.enChars : layouts.ruChars
         return String(word.compactMap { map[Int($0.code)] })
+    }
+
+    /// Splits leading and trailing keys that are not letters in the given
+    /// alphabet away from the word body.
+    private func splitPunctuation(_ word: [Key], letterIndex: [Int])
+        -> (leading: [Key], core: [Key], trailing: [Key]) {
+        var core = word
+        var leading: [Key] = []
+        var trailing: [Key] = []
+        while let last = core.last, letterIndex[Int(last.code)] <= 0 {
+            trailing.insert(last, at: 0)
+            core.removeLast()
+        }
+        while let first = core.first, letterIndex[Int(first.code)] <= 0 {
+            leading.append(first)
+            core.removeFirst()
+        }
+        return (leading, core, trailing)
     }
 
     /// Punctuation as it appears on screen — Shift matters here (`"` vs `'`).
