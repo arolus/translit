@@ -896,7 +896,7 @@ final class Engine {
             return pass
         }
 
-        if isSeparator(code) {
+        if isSeparator(code, shift: flags.contains(.maskShift)) {
             let word = buffer
             let wasTainted = tainted
             reset()
@@ -929,15 +929,20 @@ final class Engine {
     /// The separator is replayed by *keycode* after a fix, so a key whose
     /// character differs between layouts (`/` is `.` in Russian) still yields
     /// what the user meant: no fix → original char, fix → target-layout char.
-    private func isSeparator(_ code: CGKeyCode) -> Bool {
+    func isSeparator(_ code: CGKeyCode, shift: Bool) -> Bool {
         switch code {
         case 49, 36, 76, 48: return true // Space, Return, keypad Enter, Tab
         default: break
         }
         let i = Int(code)
         if layouts.enLetterIndex[i] > 0 || layouts.ruLetterIndex[i] > 0 { return false }
-        guard let en = layouts.enChars[i], layouts.ruChars[i] != nil else { return false }
-        // A digit ends no word — "word2" is one token (and never auto-fixed).
+        // Shift matters: the number row carries sentence punctuation (& ? ! %),
+        // and judging it by the unshifted character marked «рассылку&» as an
+        // alphanumeric token, which is never auto-fixed.
+        let en = (shift ? layouts.enCharsShift[i] : nil) ?? layouts.enChars[i]
+        guard let en = en, (shift ? layouts.ruCharsShift[i] : nil) ?? layouts.ruChars[i] != nil
+        else { return false }
+        // A plain digit ends no word — "word2" is one token (never auto-fixed).
         if en.isNumber { return false }
         return true
     }
@@ -2103,8 +2108,19 @@ if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
     // Run the ENGINE's own decision for both layouts — what would happen if
     // these keys were typed with en active, and with ru active.
     let engine = Engine(layouts: layouts)
-    let keys = zip(codes, shifts).map { Key(code: $0, shift: $1) }
-    let space = Key(code: 49, shift: false)
+    var keys = zip(codes, shifts).map { Key(code: $0, shift: $1) }
+    // A trailing key that the engine classifies as a separator ends the word,
+    // exactly as when typing — so `--test "hfccskre&"` exercises the same
+    // classification that decides whether the token is even considered.
+    var space = Key(code: 49, shift: false)
+    if let last = keys.last, engine.isSeparator(last.code, shift: last.shift) {
+        space = last
+        keys.removeLast()
+        let shown = (last.shift ? layouts.enCharsShift[Int(last.code)] : layouts.enChars[Int(last.code)])
+            ?? layouts.enChars[Int(last.code)]
+        print("(trailing \"\(shown.map(String.init) ?? "?")\" ends the word — treated as separator)")
+    }
+    guard !keys.isEmpty else { print("nothing left to judge"); exit(0) }
     print("")
     for current in [Layouts.Current.en, Layouts.Current.ru] {
         let typed = current == .en ? renderEn() : renderRu()
