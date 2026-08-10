@@ -37,15 +37,13 @@ let minWordLength = 3
 let switchMargin = 4.0
 /// Never switch TO a reading that is itself implausible — a fix must produce
 /// something word-like, not merely something better than the typo. Average
-/// scaled log2 per transition.
+/// scaled log2 per trigram transition.
 ///
-/// Calibrated on the 200 most frequent words of each language versus the
-/// wrong-layout projections of the other language's 200 (see train/corpus):
-/// real words bottom out at -23.2 (ru) and -19.8 (en), while three quarters
-/// of the garbage sits below -23. At -22 nothing real is lost and ~80% of
-/// garbage is blocked — including "xlsx" → «чдыч» (-28.4), which the old
-/// -32 floor waved through because it only had to beat a worse typo.
-let plausibilityFloor = -26.0
+/// Only words absent from the Bloom filters ever reach this check, so it is
+/// tuned on 40k held-out rare words (frequency rank >160k, outside the
+/// filters): -28 with margin 4 rescues 96.4%/97.1% of them at 0.36%/0.59%
+/// false fixes — the best rescue/false trade in the sweep (train README).
+let plausibilityFloor = -28.0
 /// Pause after TISSelectInputSource before retyping: layout changes are
 /// applied asynchronously and early keystrokes would use the old layout.
 let layoutSettleMicroseconds: UInt32 = 60_000

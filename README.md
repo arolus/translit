@@ -15,15 +15,16 @@ you are. Resident footprint is a few megabytes.
 2. On a word separator (Space, Enter, Tab, layout-invariant punctuation) the
    buffer is read through both layouts — the same keys are «ghbdtn» in the
    English projection and «привет» in the Russian one.
-3. Each reading is scored with bigram log-probability tables baked into the
-   binary (`Sources/translit/Bigrams.swift`, ~2 KB). A reading containing a
-   non-letter key (e.g. `;`) is impossible for that language.
-4. **Is it a word?** Bloom filters over the 50k most frequent words of each
-   language (98 KB each, same file) answer this, and their verdict outranks
-   the scores in both directions — bigrams rate the meaningless "inere"
-   above «штуку», and rate the real «абзац» below the plausibility floor.
-   A fix fires when the result is a known word and the typed text is not,
-   and is refused in the mirror case.
+3. Each reading is scored with trigram log-probability tables (bigram
+   backoff baked in at training) from `Sources/translit/Bigrams.swift`,
+   ~59 KB. A reading containing a non-letter key (e.g. `;`) is impossible
+   for that language.
+4. **Is it a word?** Bloom filters over the Hunspell dictionaries plus the
+   most frequent corpus forms — ~198k en + ~184k ru words, 746 KB total —
+   answer this, and their verdict outranks the scores in both directions:
+   n-grams rate the meaningless "inere" above «штуку», and rate the real
+   «абзац» below the plausibility floor. A fix fires when the result is a
+   known word and the typed text is not, and is refused in the mirror case.
 5. When neither reading is a known word, the alternative layout wins only if
    it beats the typed one by `switchMargin` (1 bit per character) and is
    itself plausible (`plausibilityFloor`). Then: the separator keystroke is swallowed, the word
@@ -135,19 +136,19 @@ list, twice per word: typed correctly (any fix is a false positive) and
 typed with the other layout active (a fix is the point). Add `--verbose` for
 examples of both kinds of miss.
 
-Against Hunspell dictionaries (194k words, none of which the thresholds were
-tuned on):
-
 | corpus | wrongly changed | rescued |
 |---|---|---|
-| ru_RU.dic, 146k words | 0.09% | 98.3% |
-| en_US.dic, 48k words | 0.16% | 98.1% |
+| ru_RU.dic, 146k words (in the filters) | 0.016% | 99.85% |
+| en_US.dic, 48k words (in the filters) | 0.071% | 99.2% |
+| rare ru forms, rank >160k, outside the filters | 0.36% | 96.4% |
+| rare en forms, rank >160k, outside the filters | 0.59% | 97.1% |
+| OpenSubtitles top-300k mix | 0.28% / 0.48% | 97.0% / 97.6% |
 
-The residue on both axes is dominated by acronyms and abbreviations (вуз,
-квн, bbq, dj, ghz) whose wrong-layout twin is a plausible word — genuinely
-ambiguous, and what `exceptions.txt` is for. Frequency-list tails
-(OpenSubtitles 300k) score worse (~0.3% / ~95%) mostly because they are full
-of misspellings and foreign words.
+The held-out rows exercise the pure statistics path and set the
+`switchMargin`/`plausibilityFloor` constants. The residue is dominated by
+acronyms (вуз, квн, bbq, dj) whose wrong-layout twin is a plausible word —
+genuinely ambiguous, and what `exceptions.txt` is for — plus, in frequency
+tails, misspellings and foreign names. Corpora: `train/corpus/fetch.sh`.
 
 ## Known limitations
 
