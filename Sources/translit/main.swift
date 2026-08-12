@@ -162,6 +162,17 @@ final class Layouts {
         refreshCurrent()
     }
 
+    /// Re-reads the active layout and reports whether it differs from what we
+    /// believed. The change notification can arrive after the user has already
+    /// typed a word in the new layout, and acting on a stale belief "fixes"
+    /// correctly typed text (English typed while we still think Russian reads
+    /// as garbage and gets retyped identically). Main thread only.
+    func refreshCurrentIfChanged() -> Bool {
+        let before = current
+        refreshCurrent()
+        return current != before
+    }
+
     /// Re-reads which layout is active. Main thread only.
     func refreshCurrent() {
         precondition(Thread.isMainThread)
@@ -900,6 +911,13 @@ final class Engine {
             let word = buffer
             let wasTainted = tainted
             reset()
+            // Verify the layout against the system instead of trusting the
+            // cached value: if it moved, the word was typed under a layout we
+            // did not know about, so it is not ours to judge.
+            if layouts.refreshCurrentIfChanged() {
+                log("Layout changed without notice — leaving this word alone.")
+                return pass
+            }
             if !wasTainted, !word.isEmpty,
                let correction = decideFix(word: word,
                                           separator: Key(code: code,
