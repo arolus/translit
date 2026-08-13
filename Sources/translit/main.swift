@@ -1157,6 +1157,17 @@ final class Engine {
         replay([correction.separator])
         dict.addException(correction.originalWord)
         log("Reverted \"\(correction.originalWord)\" — added to exceptions.txt.")
+        // The exception is permanent and silent otherwise — a stray Backspace
+        // after a fix quietly disables that word forever, which then reads as
+        // "Translit stopped working on f". Make it visible and reversible.
+        let script = "display notification " +
+            "\"«\(correction.originalWord)» больше не будет исправляться. " +
+            "Передумали — удалите его из Словарь → Исключения.\" " +
+            "with title \"Translit: отмена и исключение\""
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", script]
+        try? proc.run()
         reset()
     }
 
@@ -1713,7 +1724,12 @@ final class DictionaryWindowController: NSObject, NSWindowDelegate,
                    row: Int) -> NSView? {
         let word = words[row]
         let isWordColumn = tableColumn?.identifier.rawValue == "word"
-        let text = isWordColumn ? word : layouts.converted(word)
+        var text = isWordColumn ? word : layouts.converted(word)
+        // A rule is dead while its typo sits in the exceptions (exceptions
+        // are checked first) — say so right where the user is looking.
+        if !isWordColumn, showingRules, dict.exceptions.contains(layouts.converted(word)) {
+            text += "  ⚠️ заблокировано исключением"
+        }
         let id = NSUserInterfaceItemIdentifier("cell")
         let label = (tableView.makeView(withIdentifier: id, owner: nil) as? NSTextField)
             ?? {
