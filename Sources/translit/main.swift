@@ -57,6 +57,9 @@ let soundDefaultsKey = "soundOnFix"
 let autoUpdateDefaultsKey = "autoUpdate"
 let excludedAppsDefaultsKey = "excludedApps"
 let exceptionWordsDefaultsKey = "exceptionWords"
+/// Backspace-undo strikes per word before it lands in the exceptions.
+let undosBeforeException = 3
+let revertCountsKey = "revertCounts"
 let defaultExcludedApps = ["com.apple.Terminal", "com.googlecode.iterm2"]
 
 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -1155,20 +1158,42 @@ final class Engine {
         usleep(layoutSettleMicroseconds)
         replay(correction.originalKeys)
         replay([correction.separator])
-        dict.addException(correction.originalWord)
-        log("Reverted \"\(correction.originalWord)\" — added to exceptions.txt.")
-        // The exception is permanent and silent otherwise — a stray Backspace
-        // after a fix quietly disables that word forever, which then reads as
-        // "Translit stopped working on f". Make it visible and reversible.
-        let script = "display notification " +
-            "\"«\(correction.originalWord)» больше не будет исправляться. " +
-            "Передумали — удалите его из Словарь → Исключения.\" " +
-            "with title \"Translit: отмена и исключение\""
+
+        // A single revert can be a stray Backspace or a one-off — a permanent
+        // exception on the first strike buried rules invisibly ("f suddenly
+        // stopped being fixed"). The word is excepted only after it has been
+        // reverted three times; every strike announces itself.
+        let word = correction.originalWord.lowercased()
+        var counts = UserDefaults.standard.dictionary(forKey: revertCountsKey) as? [String: Int] ?? [:]
+        let strikes = (counts[word] ?? 0) + 1
+        if strikes >= undosBeforeException {
+            counts.removeValue(forKey: word) // reset, so un-excepting starts fresh
+            UserDefaults.standard.set(counts, forKey: revertCountsKey)
+            dict.addException(word)
+            log("Reverted \"\(correction.originalWord)\" (strike \(strikes)) — excepted for good.")
+            postUserNotification(
+                title: "Translit: больше не исправляю",
+                text: "«\(correction.originalWord)» отменяли \(strikes) раза — добавил в " +
+                      "исключения. Передумали — удалите его из Словарь → Исключения.")
+        } else {
+            counts[word] = strikes
+            UserDefaults.standard.set(counts, forKey: revertCountsKey)
+            log("Reverted \"\(correction.originalWord)\" (strike \(strikes) of \(undosBeforeException)).")
+            postUserNotification(
+                title: "Translit: отменено",
+                text: "«\(correction.originalWord)» вернул как было (\(strikes) из " +
+                      "\(undosBeforeException)). После \(undosBeforeException)-го раза " +
+                      "перестану исправлять это слово.")
+        }
+        reset()
+    }
+
+    private func postUserNotification(title: String, text: String) {
+        let script = "display notification \"\(text)\" with title \"\(title)\""
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", script]
         try? proc.run()
-        reset()
     }
 
     // MARK: Synthetic events
