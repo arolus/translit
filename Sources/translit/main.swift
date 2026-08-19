@@ -44,6 +44,17 @@ let switchMargin = 4.0
 /// filters): -28 with margin 4 rescues 96.4%/97.1% of them at 0.36%/0.59%
 /// false fixes — the best rescue/false trade in the sweep (train README).
 let plausibilityFloor = -28.0
+/// Margin demanded when the fix would NOT land on a known word — swapping one
+/// unknown string for another needs far stronger evidence. Swept with --eval
+/// over held-out rare words; see README.
+let unknownTargetMargin = 8.0
+/// Extra margin demanded to switch a word AWAY from the language the user has
+/// been writing in. Letter statistics judge each word in a vacuum, so a short
+/// Russian word whose Latin twin is also a word («уму» → "eve") loses on its
+/// own merits — mid-sentence, the surrounding language is the better witness.
+let stickinessMargin = 8.0
+/// Consecutive words in one language before the streak counts as context.
+let stickinessMinStreak = 1
 /// Pause after TISSelectInputSource before retyping: layout changes are
 /// applied asynchronously and early keystrokes would use the old layout.
 let layoutSettleMicroseconds: UInt32 = 60_000
@@ -696,6 +707,10 @@ final class Engine {
     private var deferredKeys: [(code: CGKeyCode, flags: CGEventFlags)] = []
     /// Recent tap-disabled-by-timeout timestamps — the thrash detector.
     private var tapDisabledTimes: [Date] = []
+    /// Language of the words the user has just been writing, and how many in
+    /// a row — the context that letter statistics cannot see.
+    private var streakLanguage: Layouts.Current?
+    private var streakCount = 0
     /// The thrash breaker tripped; the tap stays down until the revival
     /// timer (or the user, or a wake) re-arms it.
     private(set) var tapSuspended = false
@@ -784,6 +799,9 @@ final class Engine {
             guard let self = self else { return }
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self.frontAppID = app?.bundleIdentifier ?? ""
+            // Another app is another text: its language streak is unrelated.
+            self.streakLanguage = nil
+            self.streakCount = 0
             self.reset()
             // The icon dims in excluded apps — tell the status bar to re-look.
             self.onStateChange?()
@@ -921,10 +939,15 @@ final class Engine {
                 log("Layout changed without notice — leaving this word alone.")
                 return pass
             }
-            if !wasTainted, !word.isEmpty,
-               let correction = decideFix(word: word,
-                                          separator: Key(code: code,
-                                                         shift: flags.contains(.maskShift))) {
+            let correction = wasTainted || word.isEmpty ? nil
+                : decideFix(word: word,
+                            separator: Key(code: code, shift: flags.contains(.maskShift)))
+            // Track the language of what actually ends up on screen: the
+            // target layout when fixed, the active one when left alone.
+            if !wasTainted {
+                noteWordLanguage(word, assumed: correction?.fixedLayout ?? layouts.current)
+            }
+            if let correction = correction {
                 // Swallow the separator and apply the fix asynchronously: the
                 // callback returns immediately, so system-wide key delivery
                 // never stalls (a blocking callback here used to freeze input).
@@ -1081,10 +1104,25 @@ final class Engine {
                 explanation?("the other reading is impossible or implausible — left alone")
                 return nil
             }
-            if let ownScore = own, otherScore - ownScore < switchMargin {
+            // Neither reading is a known word: the fix would replace one
+            // unknown string with another, so it must be far more convincing
+            // than a fix that lands on a real word. «инфы» (slang, in no
+            // dictionary) used to flip to the meaningless "byas" on a gap of
+            // 4.6 — barely over the ordinary margin.
+            var required = fixedIsWord ? switchMargin : unknownTargetMargin
+            // Writing streak: switching a word away from the language of the
+            // last few words needs more evidence than switching into it.
+            if streakLanguage == current, streakCount >= stickinessMinStreak {
+                required += stickinessMargin
+            }
+            if let ownScore = own, otherScore - ownScore < required {
+                var why = fixedIsWord ? "" : ", target is not a known word"
+                if streakLanguage == current, streakCount >= stickinessMinStreak {
+                    why += ", and you have been writing \(current == .ru ? "Russian" : "English")"
+                }
                 explanation?(String(format: "scores too close (own %.1f vs other %.1f, " +
-                                            "need +%.0f) — left alone",
-                                    ownScore, otherScore, switchMargin))
+                                            "need +%.0f%@) — left alone",
+                                    ownScore, otherScore, required, why))
                 return nil
             }
             explanation?("statistics: \"\(fixedWord)\" wins clearly")
@@ -1101,6 +1139,23 @@ final class Engine {
     private func readWord(_ word: [Key], current: Layouts.Current) -> String {
         let map = current == .en ? layouts.enChars : layouts.ruChars
         return String(word.compactMap { map[Int($0.code)] })
+    }
+
+    /// Records the language of a finished word for the writing streak. A word
+    /// counts only if it is a known word in that language — otherwise a run of
+    /// nonsense would build a "streak" and then defend itself.
+    func noteWordLanguage(_ word: [Key], assumed: Layouts.Current) {
+        guard assumed == .en || assumed == .ru else { return }
+        let split = splitPunctuation(word, letterIndex: layouts.letterIndex(for: assumed))
+        guard split.core.count >= 2 else { return }
+        let text = readWord(split.core, current: assumed).lowercased()
+        guard KnownWords.isKnown(text, language: assumed) else { return }
+        if streakLanguage == assumed {
+            streakCount += 1
+        } else {
+            streakLanguage = assumed
+            streakCount = 1
+        }
     }
 
     /// Splits leading and trailing keys that are not letters in the given
@@ -2115,6 +2170,50 @@ if let flagIndex = args.firstIndex(of: "--eval"), flagIndex + 2 < args.count {
     if showMisses {
         if !brokenExamples.isEmpty { print("  wrongly changed: \(brokenExamples.joined(separator: " "))") }
         if !missedExamples.isEmpty { print("  not rescued: \(missedExamples.joined(separator: " "))") }
+    }
+    exit(0)
+}
+
+// Debug: `translit --phrase "слово слово …" <ru|en>` types the whole phrase
+// through the engine with that layout active, so the writing-streak context
+// is exercised the way it is in real use.
+if let flagIndex = args.firstIndex(of: "--phrase"), flagIndex + 2 < args.count {
+    guard let layouts = Layouts() else { exit(1) }
+    let phrase = args[flagIndex + 1]
+    let language: Layouts.Current = args[flagIndex + 2] == "ru" ? .ru : .en
+
+    var keycodeFor: [Character: (code: CGKeyCode, shift: Bool)] = [:]
+    for (maps, shift) in [([layouts.enChars, layouts.ruChars], false),
+                          ([layouts.enCharsShift, layouts.ruCharsShift], true)] {
+        for map in maps {
+            for code in 0..<128 {
+                guard let ch = map[code], keycodeFor[ch] == nil else { continue }
+                keycodeFor[ch] = (CGKeyCode(code), shift)
+            }
+        }
+    }
+
+    let engine = Engine(layouts: layouts)
+    let space = Key(code: 49, shift: false)
+    print("typing with \(language == .ru ? "ru" : "en") active:")
+    for token in phrase.split(separator: " ") {
+        var keys: [Key] = []
+        var ok = true
+        for ch in token.lowercased() {
+            guard let stroke = keycodeFor[ch] else { ok = false; break }
+            keys.append(Key(code: stroke.code, shift: stroke.shift))
+        }
+        guard ok, !keys.isEmpty else { print("  \(token): unmappable"); continue }
+        var why = ""
+        let verdict = engine.decide(word: keys, separator: space, current: language) { why = $0 }
+        engine.noteWordLanguage(keys, assumed: verdict?.fixedLayout ?? language)
+        if let verdict = verdict {
+            let map = verdict.fixedLayout == .ru ? layouts.ruChars : layouts.enChars
+            let fixed = String(verdict.coreKeys.compactMap { map[Int($0.code)] })
+            print("  \(token) → \(verdict.leadingText)\(fixed)\(verdict.trailingText)   (\(why))")
+        } else {
+            print("  \(token) — оставлено   (\(why))")
+        }
     }
     exit(0)
 }
