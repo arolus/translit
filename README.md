@@ -25,9 +25,15 @@ you are. Resident footprint is a few megabytes.
    n-grams rate the meaningless "inere" above «штуку», and rate the real
    «абзац» below the plausibility floor. A fix fires when the result is a
    known word and the typed text is not, and is refused in the mirror case.
-5. When neither reading is a known word, the alternative layout wins only if
-   it beats the typed one by `switchMargin` (1 bit per character) and is
-   itself plausible (`plausibilityFloor`). Then: the separator keystroke is swallowed, the word
+5. Otherwise the statistics decide, against a margin that grows with how
+   little the fix has going for it: `switchMargin` normally,
+   `unknownTargetMargin` when the fix would not land on a known word either
+   (swapping one unknown string for another needs real evidence), plus
+   `stickinessMargin` when it would switch a word *away* from the language
+   the last words were written in. That last one is the only context the
+   engine has, and it is what keeps «уму» from becoming "eve" mid-sentence —
+   both are real words, so nothing about the word alone can settle it.
+   The target must also clear `plausibilityFloor`. Then: the separator keystroke is swallowed, the word
    is erased with synthetic Backspaces, `TISSelectInputSource` switches the
    layout, the word and the separator are retyped. Works for Enter too — the
    fix happens *before* the Enter is delivered, so chat messages go out
@@ -134,7 +140,10 @@ It also prints held-out validation accuracy and the score-gap percentiles the
 `--eval <wordlist> <ru|en>` runs the engine's actual decision over a word
 list, twice per word: typed correctly (any fix is a false positive) and
 typed with the other layout active (a fix is the point). Add `--verbose` for
-examples of both kinds of miss.
+examples of both kinds of miss. `--phrase "слово слово …" <ru|en>` types a
+whole phrase through the engine, which is the only way to exercise the
+writing-streak context (`--eval` judges words in isolation, so its numbers
+are the no-context worst case).
 
 | corpus | wrongly changed | rescued |
 |---|---|---|
