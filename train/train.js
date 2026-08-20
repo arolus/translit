@@ -29,7 +29,7 @@ const BLOOM_FREQ_WORDS = 150000;
 const BLOOM_BITS_PER_WORD = 16;
 const BLOOM_HASHES = 11;
 
-const EN = 'abcdefghijklmnopqrstuvwxyz'; // 26, index 1..26; 0 = boundary
+const EN = "abcdefghijklmnopqrstuvwxyz'"; // + apostrophe: contractions are words
 const RU = 'абвгдежзийклмнопрстуфхцчшщъыьэюяё'; // 33, index 1..33; 0 = boundary
 const LOG_SCALE = 4; // stored value = round(log2(p) * LOG_SCALE), clamped to Int8
 
@@ -75,7 +75,7 @@ function isFrequencyList(text) {
 function extractWords(text) {
   const lower = text.toLowerCase();
   return {
-    en: lower.match(/[a-z]+/g) || [],
+    en: (lower.match(/[a-z]+(?:'[a-z]+)*/g) || []),
     ru: lower.match(/[а-яё]+/g) || [],
   };
 }
@@ -237,7 +237,7 @@ function main() {
       const text = fs.readFileSync(input.slice(6), 'utf8');
       for (const line of text.split('\n')) {
         const word = line.trim().toLowerCase();
-        if (/^[a-z]{2,}$/.test(word)) enDict.add(word);
+        if (/^[a-z][a-z']*[a-z]$/.test(word)) enDict.add(word);
         else if (/^[а-яё]{2,}$/.test(word)) ruDict.add(word);
       }
       files++;
@@ -258,7 +258,7 @@ function main() {
           const word = m[1].toLowerCase();
           const weight = Math.sqrt(Number(m[2]));
           const count = Number(m[2]);
-          if (/^[a-z]+$/.test(word)) {
+          if (/^[a-z]+(?:'[a-z]+)*$/.test(word)) {
             enWeighted.set(word, (enWeighted.get(word) || 0) + weight);
             enFreq.set(word, (enFreq.get(word) || 0) + count);
           } else if (/^[а-яё]+$/.test(word)) {

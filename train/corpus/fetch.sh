@@ -15,6 +15,6 @@ curl -sL https://raw.githubusercontent.com/LibreOffice/dictionaries/master/ru_RU
   | grep -E '^[а-яё]{2,}$' | sort -u > ru_hunspell_words.txt
 curl -sL https://raw.githubusercontent.com/LibreOffice/dictionaries/master/en/en_US.dic \
   | sed 's|/.*||' | grep -E "^[a-zA-Z']+$" | tr 'A-Z' 'a-z' \
-  | grep -E '^[a-z]{2,}$' | sort -u > en_hunspell_words.txt
+  | grep -E "^[a-z][a-z']*[a-z]$" | sort -u > en_hunspell_words.txt
 
 wc -l ru_50k.txt en_50k.txt ru_hunspell_words.txt en_hunspell_words.txt

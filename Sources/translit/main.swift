@@ -217,6 +217,18 @@ final class Layouts {
         layout == .en ? enLetterIndex : ruLetterIndex
     }
 
+    /// Like `letterIndex`, but with the apostrophe demoted back to
+    /// punctuation. It is a letter INSIDE an English word ("I'd", "don't")
+    /// and punctuation around one ('quoted'), so scoring and edge-trimming
+    /// need different answers.
+    func edgeLetterIndex(for layout: Current) -> [Int] {
+        guard layout == .en, let apostrophe = enAlphabet.firstIndex(of: "'") else {
+            return letterIndex(for: layout)
+        }
+        let index = enAlphabet.distance(from: enAlphabet.startIndex, to: apostrophe) + 1
+        return enLetterIndex.map { $0 == index ? -1 : $0 }
+    }
+
     /// What a word turns into on the other layout: "b" → «и», "еру" → "the".
     /// Direction is inferred from the alphabet. "?" marks unmappable chars.
     func converted(_ word: String) -> String {
@@ -1029,8 +1041,8 @@ final class Engine {
         // `;` is punctuation in English but the letter ж in Russian, so
         // stripping by the active layout turned «;tyf» into "ена". So split
         // both ways and prefer the reading that yields a real word.
-        let ownSplit = splitPunctuation(word, letterIndex: layouts.letterIndex(for: current))
-        let targetSplit = splitPunctuation(word, letterIndex: layouts.letterIndex(for: target))
+        let ownSplit = splitPunctuation(word, letterIndex: layouts.edgeLetterIndex(for: current))
+        let targetSplit = splitPunctuation(word, letterIndex: layouts.edgeLetterIndex(for: target))
         var (leadingKeys, coreKeys, trailingKeys) = ownSplit
 
         // The own-layout reading only counts as counter-evidence when it is
@@ -1146,7 +1158,7 @@ final class Engine {
     /// nonsense would build a "streak" and then defend itself.
     func noteWordLanguage(_ word: [Key], assumed: Layouts.Current) {
         guard assumed == .en || assumed == .ru else { return }
-        let split = splitPunctuation(word, letterIndex: layouts.letterIndex(for: assumed))
+        let split = splitPunctuation(word, letterIndex: layouts.edgeLetterIndex(for: assumed))
         guard split.core.count >= 2 else { return }
         let text = readWord(split.core, current: assumed).lowercased()
         guard KnownWords.isKnown(text, language: assumed) else { return }
