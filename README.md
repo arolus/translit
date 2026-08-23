@@ -67,6 +67,17 @@ One word per line, `#` comments, case-insensitive. Both files are watched
 edit mid-flight from the menu («Правила…» / «Исключения…») or any editor,
 no restart needed. `--test <word>` reports dictionary hits alongside scores.
 
+**Export.** «Экспорт…» in the dictionary window writes *both* lists — not just
+the visible tab — to one file, and `--export [file]` does the same from the
+shell (stdout when no path is given, so it pipes and diffs). Each section
+opens with the marker of the file it mirrors, so an export splits straight
+back into `rules.txt` and `exceptions.txt` on another Mac:
+
+```
+./.build/release/translit --export ~/Desktop/translit-dictionary.txt
+# exported 100 rule(s) and 64 exception(s) to /Users/me/Desktop/...
+```
+
 ## Safety rails
 
 - Password fields: secure input (`IsSecureEventInputEnabled`) disables fixing.
