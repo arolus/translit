@@ -55,9 +55,10 @@ repo, so edits travel between machines with the usual sync):
 
 - **rules.txt** — words fixed *always*, bypassing statistics and the minimum
   word length. This is how short words work: statistics cannot decide «b» vs
-  «и» or «yt» vs «не», the rule list can. Direction is implied by the
-  alphabet: Latin entries fix en→ru («b» is «и» typed in the English layout),
-  Cyrillic entries fix ru→en («еру» is "the" typed in the Russian one).
+  «и» or «yt» vs «не», the rule list can. Entries are the *real* words, and
+  direction is implied by the alphabet: Cyrillic entries fix en→ru («и»
+  rescues "b" typed in the English layout), Latin entries fix ru→en ("the"
+  rescues «еру» typed in the Russian one).
   Ships with ~40 common short words in both directions.
 - **exceptions.txt** — words never fixed; Backspace-undo appends here
   automatically.
@@ -163,12 +164,26 @@ are the no-context worst case).
 | rare ru forms, rank >160k, outside the filters | 0.36% | 96.4% |
 | rare en forms, rank >160k, outside the filters | 0.59% | 97.1% |
 | OpenSubtitles top-300k mix | 0.28% / 0.48% | 97.0% / 97.6% |
+| ru forms, rank 50k–160k, outside the filters (20k) | 0.19% | 96.0% |
+| en forms, rank 50k–160k, outside the filters (20k) | 0.36% | 95.7% |
 
 The held-out rows exercise the pure statistics path and set the
 `switchMargin`/`plausibilityFloor` constants. The residue is dominated by
 acronyms (вуз, квн, bbq, dj) whose wrong-layout twin is a plausible word —
 genuinely ambiguous, and what `exceptions.txt` is for — plus, in frequency
 tails, misspellings and foreign names. Corpora: `train/corpus/fetch.sh`.
+
+A word-list hit is evidence, not proof. The filters are Bloom filters, and
+the 150k "frequent forms" they hold include subtitle junk ("ght", "gey",
+"bbb"), so a Russian form outside the lists can meet an English "word" that
+is either a hash collision («углами» → "eukfvb") or junk. Such a hit used to
+win outright; now it is distrusted when the typed reading outscores it by
+more than `wordListDominanceMargin` (12), and the statistics decide. On the
+50k–160k rows this removed every false fix on real forms of five letters or
+more («углами», «заказав», «гостиницей», «незнакомками»; "bowties",
+"sleepier") — 46 → 38 and 78 → 71 false fixes per 20k — for 0 Russian and
+9 of 47.8k English dictionary rescues. What remains is three-letter noise
+(«вук», «ауу», «иии») that no statistic can separate from "der" or "fee".
 
 ## Known limitations
 

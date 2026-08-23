@@ -49,6 +49,14 @@ let plausibilityFloor = -28.0
 /// unknown string for another needs far stronger evidence. Swept with --eval
 /// over held-out rare words; see README.
 let unknownTargetMargin = 8.0
+/// How far the typed reading may outscore a word-list hit before the hit is
+/// distrusted (see the Bloom false-positive note in the engine). Swept over
+/// 20k held-out forms per language outside the lists (ranks 50k–160k):
+/// 12 removes every false fix on real inflected forms of 5+ letters
+/// («углами», «гостиницей», «незнакомками») at a cost of 0 Russian and 9 of
+/// 47.8k English dictionary rescues; 8 costs 6/22 rescues for the same gain,
+/// 16+ lets 4-letter forms through again.
+let wordListDominanceMargin = 12.0
 /// Extra margin demanded to switch a word AWAY from the language the user has
 /// been writing in. Letter statistics judge each word in a vacuum, so a short
 /// Russian word whose Latin twin is also a word («уму» → "eve") loses on its
@@ -1115,14 +1123,19 @@ final class Engine {
             let ruScore = scoreReading(codes, letterIndex: layouts.ruLetterIndex,
                                        table: ruTrigrams, n: ruN)
             let (own, other) = current == .en ? (enScore, ruScore) : (ruScore, enScore)
-            // SWEEP-TEMP: env-tunable demotion of a Bloom hit that the statistics contradict.
+            // A word-list hit is evidence, not proof: the filters are Bloom
+            // filters with a measured ~2% false-positive rate, and «углами»
+            // (rank 73k, outside the lists) was rewritten to the garbage
+            // "eukfvb" on nothing but such a hit. When the typed reading
+            // outscores the "word" by a wide margin — or the "word" cannot be
+            // read at all — the hit is demoted to an unknown string and the
+            // statistics decide with the stricter unknown-target margin.
             if fixedIsWord, !ownIsWord {
-                let env = ProcessInfo.processInfo.environment
-                let floor = Double(env["TL_BLOOM_FLOOR"] ?? "") ?? -Double.infinity
-                let dominance = Double(env["TL_BLOOM_DOMINANCE"] ?? "") ?? Double.infinity
-                if let o = other, let w = own, (o < floor || w - o > dominance) {
+                if let o = other, let w = own, w - o > wordListDominanceMargin {
                     fixedIsWord = false
-                    explanation?(String(format: "\"%@\" is in the word list but scores %.1f against %.1f — treated as unknown", fixedWord, o, w))
+                    explanation?(String(format: "\"%@\" is in the word list but the typed " +
+                                                "reading outscores it by %.1f — treated as unknown",
+                                        fixedWord, w - o))
                 } else if other == nil {
                     fixedIsWord = false
                 }
