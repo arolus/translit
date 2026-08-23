@@ -24,6 +24,7 @@ import Foundation
 import AppKit
 import Carbon.HIToolbox
 import Darwin
+import UniformTypeIdentifiers
 
 // MARK: - Constants
 
@@ -561,6 +562,27 @@ final class UserDict {
         guard exceptions.remove(lower) != nil else { return }
         Self.removeLine(lower, from: Self.exceptionsPath)
         onChange?()
+    }
+
+    /// Both lists as one self-describing file. Each section opens with the
+    /// exact marker of the file it mirrors, so an export can be split straight
+    /// back into rules.txt and exceptions.txt — or dropped in whole, since the
+    /// parser ignores comments and the second marker is just another comment.
+    func exportText(now: Date = Date()) -> String {
+        var lines = [
+            "# translit-export v1",
+            "# Exported \(ISO8601DateFormatter().string(from: now)) by Translit \(appVersion).",
+            "# Two sections follow, mirroring the files in \(Self.dirPath).",
+            "# Split them back into rules.txt and exceptions.txt to carry this",
+            "# dictionary to another Mac; the app rereads both files on change.",
+            "",
+            Self.formatMarker,
+            "",
+        ]
+        lines += rules.sorted()
+        lines += ["", Self.exceptionsMarker, ""]
+        lines += exceptions.sorted()
+        return lines.joined(separator: "\n") + "\n"
     }
 
     private static func append(_ line: String, to path: String) {
@@ -1768,7 +1790,11 @@ final class DictionaryWindowController: NSObject, NSWindowDelegate,
         let fileButton = NSButton(title: "Открыть файл…", target: self,
                                   action: #selector(openFileClicked))
         fileButton.bezelStyle = .rounded
-        let bottomRow = NSStackView(views: [removeButton, NSView(), fileButton])
+        let exportButton = NSButton(title: "Экспорт…", target: self,
+                                    action: #selector(exportClicked))
+        exportButton.bezelStyle = .rounded
+        let bottomRow = NSStackView(views: [removeButton, NSView(),
+                                            exportButton, fileButton])
         bottomRow.orientation = .horizontal
 
         let stack = NSStackView(views: [segmented, infoLabel, scroll, addRow, bottomRow])
@@ -1865,6 +1891,41 @@ final class DictionaryWindowController: NSObject, NSWindowDelegate,
     @objc private func openFileClicked() {
         let path = showingRules ? UserDict.rulesPath : UserDict.exceptionsPath
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    /// Saves both lists — not just the visible tab — to a file the user picks:
+    /// a backup that outlives a reinstall and carries to another Mac.
+    @objc private func exportClicked() {
+        let panel = NSSavePanel()
+        panel.title = "Экспорт словаря"
+        panel.nameFieldStringValue = "translit-dictionary-\(Self.exportStamp()).txt"
+        panel.allowedContentTypes = [.plainText]
+        panel.isExtensionHidden = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            do {
+                try self.dict.exportText().write(to: url, atomically: true, encoding: .utf8)
+                log("Dictionary exported to \(url.path): " +
+                    "\(self.dict.rules.count) rule(s), " +
+                    "\(self.dict.exceptions.count) exception(s).")
+            } catch {
+                // Read-only volumes and permission denials land here; saying so
+                // beats a sheet that closes as if the file had been written.
+                log("⚠️ Export to \(url.path) failed: \(error.localizedDescription)")
+                let alert = NSAlert()
+                alert.messageText = "Не удалось сохранить файл"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        }
+    }
+
+    private static func exportStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
     }
 }
 
@@ -2231,6 +2292,28 @@ if let flagIndex = args.firstIndex(of: "--phrase"), flagIndex + 2 < args.count {
 }
 
 // Debug: score a word through both layout readings without installing.
+// Dictionary backup: `translit --export [file]` writes both lists as one
+// self-describing file, or to stdout when no path is given — so a dictionary
+// can be archived, diffed or piped without opening the window.
+if let flagIndex = args.firstIndex(of: "--export") {
+    let dict = UserDict()
+    let text = dict.exportText()
+    if flagIndex + 1 < args.count, !args[flagIndex + 1].hasPrefix("--") {
+        let path = (args[flagIndex + 1] as NSString).expandingTildeInPath
+        do {
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            print("exported \(dict.rules.count) rule(s) and " +
+                  "\(dict.exceptions.count) exception(s) to \(path)")
+        } catch {
+            print("cannot write \(path): \(error.localizedDescription)")
+            exit(1)
+        }
+    } else {
+        print(text, terminator: "")
+    }
+    exit(0)
+}
+
 // Example: translit --test ghbdtn   → shows both readings and the verdict.
 if let flagIndex = args.firstIndex(of: "--test"), flagIndex + 1 < args.count {
     guard let layouts = Layouts() else { exit(1) }
