@@ -1108,7 +1108,25 @@ final class Engine {
             // (-23.0) below the plausibility floor, so the word list has to
             // be consulted BEFORE the thresholds, not after them.
             let ownIsWord = KnownWords.isKnown(ownWord.lowercased(), language: current)
-            let fixedIsWord = KnownWords.isKnown(fixedWord.lowercased(), language: target)
+            var fixedIsWord = KnownWords.isKnown(fixedWord.lowercased(), language: target)
+            let codes = coreKeys.map { $0.code }
+            let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
+                                       table: enTrigrams, n: enN)
+            let ruScore = scoreReading(codes, letterIndex: layouts.ruLetterIndex,
+                                       table: ruTrigrams, n: ruN)
+            let (own, other) = current == .en ? (enScore, ruScore) : (ruScore, enScore)
+            // SWEEP-TEMP: env-tunable demotion of a Bloom hit that the statistics contradict.
+            if fixedIsWord, !ownIsWord {
+                let env = ProcessInfo.processInfo.environment
+                let floor = Double(env["TL_BLOOM_FLOOR"] ?? "") ?? -Double.infinity
+                let dominance = Double(env["TL_BLOOM_DOMINANCE"] ?? "") ?? Double.infinity
+                if let o = other, let w = own, (o < floor || w - o > dominance) {
+                    fixedIsWord = false
+                    explanation?(String(format: "\"%@\" is in the word list but scores %.1f against %.1f — treated as unknown", fixedWord, o, w))
+                } else if other == nil {
+                    fixedIsWord = false
+                }
+            }
             if ownIsWord && !fixedIsWord {
                 explanation?("\"\(ownWord)\" is a known word and \"\(fixedWord)\" is not — " +
                              "left alone")
@@ -1126,13 +1144,6 @@ final class Engine {
                                   originalLayout: current, fixedLayout: target,
                                   originalWord: ownWord)
             }
-
-            let codes = coreKeys.map { $0.code }
-            let enScore = scoreReading(codes, letterIndex: layouts.enLetterIndex,
-                                       table: enTrigrams, n: enN)
-            let ruScore = scoreReading(codes, letterIndex: layouts.ruLetterIndex,
-                                       table: ruTrigrams, n: ruN)
-            let (own, other) = current == .en ? (enScore, ruScore) : (ruScore, enScore)
 
             guard let otherScore = other, otherScore >= plausibilityFloor else {
                 explanation?("the other reading is impossible or implausible — left alone")
